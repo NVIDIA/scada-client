@@ -1,0 +1,358 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_COMM_PROTOCOL
+#define GDAKIS_COMM_PROTOCOL
+
+#include <cstdint>
+#include <gdakis/__comm_cuda_compat>
+#include <gdakis/none>
+#include <ostream>
+#include <psa/result>
+
+//! @file gdakis/comm/protocol
+
+namespace gdakis::comm {
+
+//! @brief Protocol version structure
+struct protocol_version {
+    //! @brief Major version number
+    uint16_t major = 0;
+    //! @brief Minor version number
+    uint16_t minor = 0;
+
+    //! @brief Default constructor
+    protocol_version() noexcept = default;
+
+    //! @brief Constructor with major and minor version
+    constexpr protocol_version(uint16_t maj, uint16_t min) noexcept : major(maj), minor(min) {}
+
+    //! @brief Equality comparison
+    constexpr bool operator==(const protocol_version & other) const noexcept {
+        return major == other.major && minor == other.minor;
+    }
+
+    //! @brief Inequality comparison
+    constexpr bool operator!=(const protocol_version & other) const noexcept { return !(*this == other); }
+};
+
+//! @brief Current GDAKIS communication protocol version
+static constexpr protocol_version PROTOCOL_VERSION { 1, 0 };
+
+//! @brief Operations supported by all domains
+enum class operation : uint16_t {
+    //! @brief Invalid operation. This operation is ignored
+    invalid = 0x0,
+    //! @brief Request to register a set of work request buffers
+    register_request_buffers = 0x2,
+    //! @brief Request to deregister a set of work request buffers
+    deregister_request_buffers = 0x3,
+    //! @brief Request to register a memory buffer
+    register_memory_buffer = 0x4,
+    //! @brief Request to deregister a memory buffer
+    deregister_memory_buffer = 0x5,
+    //! @brief Request to register an I/O buffer pool
+    register_io_buffer_pool = 0x6,
+    //! @brief Request to deregister an I/O buffer pool
+    deregister_io_buffer_pool = 0x7,
+    //! @brief Request to get protocol version
+    get_protocol_version = 0x8
+};
+
+//! @brief Supported device types
+enum class device_type : uint8_t {
+    //! @brief Invalid device
+    invalid = 0x0,
+    //! @brief A regular CPU running an operating system
+    cpu = 0x1,
+    //! @brief A CUDA-capable GPU
+    cuda = 0x2
+};
+
+//! @brief Operator overload for pretty-printing device types
+//! @param os Reference to the output stream where to print the device type
+//! @param device The device type to print
+//! @returns Reference to the output stream where to continue printing
+static inline std::ostream & operator<<(std::ostream & os, const device_type & device) noexcept;
+
+//! @brief Supported transport types
+enum class transport_type : uint8_t {
+    //! @brief Invalid transport
+    invalid = 0x0,
+    //! @brief Inter Process Communication within the same node
+    ipc = 0x1,
+    //! @brief Remote Direct Memory Access through a RDMA-capable fabric
+    rdma = 0x2
+};
+
+//! @brief Helper class to select the appropriate transport backend
+//! @tparam _Transport Transport type top select the backend
+template<transport_type _Transport>
+struct transport_backend;
+
+//! @brief Operator overload for pretty-printing transport types
+//! @param os Reference to the output stream where to print the transport type
+//! @param transport The transport type to print
+//! @returns Reference to the output stream where to continue printing
+static inline std::ostream & operator<<(std::ostream & os, const transport_type & transport) noexcept;
+
+//! @brief Supported return values
+enum class status_type : uint32_t {
+    //! @brief The request succeeded
+    ok = 0x0,
+    //! @brief The request failed
+    error = 0x1
+};
+
+//! @brief Common type to represent a request for the supported operations
+template<operation>
+struct request;
+
+//! @brief Common type to represent a response for the supported operations
+template<operation>
+struct response {};
+
+#pragma pack(push, 1)
+//! @brief Specialization for invalid operations
+//!
+//! This type is empty since nothing is requested
+//!
+template<>
+struct request<operation::invalid> {};
+
+//! @brief Specialization for a request to get protocol version
+//!
+//! This type is empty since no parameters are needed
+//!
+template<>
+struct request<operation::get_protocol_version> {};
+
+//! @brief Specialization for a request to register a set of work request buffers
+template<>
+struct request<operation::register_request_buffers> {
+    //! @brief The number of buffers in the set
+    uint16_t num_buffers;
+    //! @brief Size (in bytes) of each work request in the buffers
+    uint16_t entry_size;
+    //! @brief Number of work request entries on each buffer
+    uint32_t buffer_size;
+};
+
+//! @brief Specialization for a request to deregister a set of work request buffers
+template<>
+struct request<operation::deregister_request_buffers> {
+    //! @brief ID assigned to the work request buffer set when registered
+    uint32_t id;
+};
+
+//! @brief Specialization for a request to register a memory buffer
+template<>
+struct request<operation::register_memory_buffer> {
+    //! @brief Size (in bytes) of the memory buffer
+    uint32_t buffer_size;
+};
+
+//! @brief Specialization for a request to deregister a memory buffer
+template<>
+struct request<operation::deregister_memory_buffer> {
+    //! @brief ID assigned to the memory buffer set when registered
+    uint32_t id;
+};
+
+//! @brief Specialization for a request to register an I/O buffer pool
+template<>
+struct request<operation::register_io_buffer_pool> {
+    //! @brief Size (in bytes) of each block within the buffer pool
+    uint32_t block_size;
+    //! @brief Number of blocks within the I/O buffer pool
+    uint32_t num_blocks;
+    //! @brief Flag to indicate whether the I/O buffer pool is used for DMA
+    bool is_dma;
+};
+
+//! @brief Specialization for a request to deregister an I/O buffer pool
+template<>
+struct request<operation::deregister_io_buffer_pool> {
+    //! @brief ID assigned to the I/O buffer pool when registered
+    uint32_t id;
+};
+
+//! @brief Specialization for a response to get protocol version
+template<>
+struct response<operation::get_protocol_version> {
+    //! @brief The current protocol version supported by the server
+    protocol_version version;
+};
+
+//! @brief Type to abstract the payload of request operations
+//! @tparam _Op Operation of the request
+//! @tparam _Backend Transport type for the request
+template<operation _Op, template<operation> typename _Backend>
+struct payload {
+    //! @brief Common fields in the request
+    request<_Op> req;
+    //! @brief Transport-specific fields in the request
+    _Backend<_Op> backend;
+};
+
+//! @brief Header type for all requests
+struct header_type {
+    //! @brief Operation being requested
+    const operation op_;
+    //! @brief Device type for the request
+    const device_type device_;
+    //! @brief Transport type for the request
+    const transport_type transport_;
+
+    //! @brief Constructor to initialize the header
+    //! @param op Operation
+    //! @param device Device
+    //! @param transport Transport
+    inline constexpr header_type(const operation op, const device_type device, const transport_type transport) noexcept
+        : op_(op),
+          device_(device),
+          transport_(transport) {}
+
+    //! @brief Default constructor that produced an invalid header
+    inline constexpr header_type() : header_type(operation::invalid, device_type::invalid, transport_type::invalid) {}
+};
+
+//! @brief Type that abstracts a full request that contains, the header, operation-specific fields, and transport-specific fields
+//! @tparam _Op Operation for the message
+//! @tparam _Backend Transport for the message
+//! @tparam _Custom Custom types to send along with the message
+template<operation _Op, typename _Backend, typename _Custom = none_type>
+class message {
+protected:
+    //! @brief Type to select the request type based on the operation
+    template<operation T>
+    using request_type = typename _Backend::template request_type<T>;
+
+    //! @cond rebreather_error_types
+    //! @brief Type to select the type of the ancillary data send along with the request.
+    //!
+    //! This is the default selector if the backed does not define any ancillary type for the request
+    template<typename _Request, typename = void>
+    struct ancillary_selector {
+        //! @brief If the backend does not define ancillary data for the request, this becomes none
+        using value_type = none_type;
+    };
+
+    //! @brief Type to select the type of the ancillary data send along with the request.
+    //!
+    //! This is the default selector if the backed defines an ancillary type for the request
+    template<typename _Request>
+    struct ancillary_selector<_Request, std::void_t<typename _Request::ancillary_type>> {
+        //! @brief Use backend-defined type for ancillary data
+        using value_type = typename _Request::ancillary_type;
+    };
+
+    //! @endcond rebreather_error_types
+
+public:
+    //! @brief Type describing all the data in this message
+    using data_type = payload<_Op, request_type>;
+
+    //! @brief Type describing the ancillary data in this message
+    using ancillary_type = typename ancillary_selector<request_type<_Op>>::value_type;
+
+protected:
+    //! @brief Type containing all the data send in this message
+    struct value_type {
+        //! @brief Common header fields
+        header_type header_;
+        //! @brief Payload with operation-specific and backend-specific fields
+        payload<_Op, request_type> data_;
+        //! @brief Any custom fields defined by the sender
+        _Custom custom_;
+    };
+
+    //! @brief Message payload
+    value_type msg_;
+
+    //! @brief Ancillary data to send in this message
+    ancillary_type ancillary_;
+
+public:
+    //! @brief Default constructor
+    inline constexpr message() noexcept;
+
+    //! @brief Gets the size (in bytes) of the data in this message
+    //! @return Size (in bytes) of the message
+    static inline constexpr std::size_t size() noexcept;
+
+    //! @brief Read-only access to the message data
+    //! @returns Constant reference to the message data
+    const data_type & data() const noexcept;
+
+    //! @brief Read-write access to the message data
+    //! @returns Reference to the message data
+    data_type & data() noexcept;
+
+    //! @brief Read-only access to the message ancillary data
+    //! @returns Constant reference to the message ancillary data
+    const ancillary_type & ancillary() const noexcept;
+
+    //! @brief Read-write access to the message ancillary data
+    //! @returns Reference to the message ancillary data
+    ancillary_type & ancillary() noexcept;
+
+    //! @brief Read-only access to the message
+    //! @returns Constant reference to the message
+    const value_type & get() const noexcept;
+
+    //! @brief Read-write access to the message
+    //! @returns Reference to the message
+    value_type & get() noexcept;
+};
+
+//! @brief Type that abstracts a full response that contains, the header, operation-specific fields, and transport-specific fields
+//! @tparam _Op Operation for the message
+//! @tparam _Backend Transport for the message
+//!
+//! This type is used when the transport defines custom fields for the response
+template<operation _Op, typename _Backend = void>
+struct acknowledge {
+    //! @brief Type to select the response type based on the operation
+    template<operation _Nop>
+    using response_type = typename _Backend::template response_type<_Nop>;
+
+    //! @brief Response status
+    status_type status;
+
+    //! @brief Identifier assigned to the request
+    int32_t id;
+
+    //! @brief Operation-specific fields
+    response<_Op> res;
+
+    //! @brief Transport-specific fields
+    response_type<_Op> backend;
+};
+
+//! @brief Type that abstracts a full response that contains, the header, operation-specific fields, and transport-specific fields
+//! @tparam _Op Operation for the message
+//!
+//! This type is used when the transport does not define custom fields for the response
+
+template<operation _Op>
+struct acknowledge<_Op, void> {
+    //! @brief Response status
+    status_type status;
+
+    //! @brief Identifier assigned to the request
+    int32_t id;
+
+    //! @brief Operation-specific fields
+    response<_Op> res;
+};
+
+#pragma pack(pop)
+
+}
+
+#include "impl/protocol"
+
+#endif

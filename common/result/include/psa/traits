@@ -1,0 +1,67 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_TRAITS_RESULT
+#define PSA_TRAITS_RESULT
+
+namespace psa { namespace traits { namespace result {
+
+template<typename>
+struct input;
+
+template<template<typename, typename, typename...> typename _Result, typename _Ok, typename _Err, typename... Args>
+struct input<_Result<_Ok, _Err, Args...>> {
+    using value_type = _Result<_Ok, _Err, Args...>;
+    using ok_type = _Ok;
+    using err_type = _Err;
+};
+
+template<typename, typename>
+struct ok_output;
+template<typename _Fn, template<typename, typename, typename...> typename _Result, typename _Ok, typename _Err,
+    typename... Args>
+struct ok_output<_Fn, _Result<_Ok, _Err, Args...>> {
+    using value_type = typename std::invoke_result_t<_Fn, _Ok>;
+    using ok_type = typename input<value_type>::ok_type;
+    using err_type = typename input<value_type>::err_type;
+};
+
+template<typename, typename>
+struct err_output;
+template<typename _Fn, template<typename, typename, typename...> typename _Result, typename _Ok, typename _Err,
+    typename... Args>
+struct err_output<_Fn, _Result<_Ok, _Err, Args...>> {
+    using value_type = typename std::invoke_result_t<_Fn, _Err>;
+    using ok_type = typename input<value_type>::ok_type;
+    using err_type = typename input<value_type>::err_type;
+};
+
+template<typename _Fn, typename _Result>
+struct require_same_err {
+    using in = input<_Result>;
+    using out = ok_output<_Fn, _Result>;
+
+    static_assert(std::is_convertible_v<typename in::err_type, typename out::err_type>, "Invalid _Err type");
+    using type = typename out::value_type;
+};
+
+template<typename _Fn, typename _Result>
+struct require_same_ok {
+    using in = input<_Result>;
+    using out = err_output<_Fn, _Result>;
+
+    static_assert(std::is_convertible_v<typename in::ok_type, typename out::ok_type>, "Invalid _Ok type");
+    using type = typename out::value_type;
+};
+
+template<typename _Fn, typename _Result>
+using require_same_err_t = typename require_same_err<_Fn, _Result>::type;
+
+template<typename _Fn, typename _Result>
+using require_same_ok_t = typename require_same_ok<_Fn, _Result>::type;
+
+}}}
+
+#endif

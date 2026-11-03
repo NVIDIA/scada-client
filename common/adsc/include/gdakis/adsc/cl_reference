@@ -1,0 +1,99 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_ADSC_CL_REFERENCE
+#define GDAKIS_ADSC_CL_REFERENCE
+
+#include <gdakis/adsc/__adsc_cuda_compat>
+#include <gdakis/adsc/__adsc_version>
+
+#include <gdakis/atomic>
+#include <type_traits>
+
+GDAKIS_ADSC_SIMPLE_NS {
+GDAKIS_ADSC_UNIT(cl_reference) {
+
+struct nullmeta_t : public std::nullopt_t {};
+struct nullsetmeta_t : public std::nullopt_t {};
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size = 1, typename _Meta = nullmeta_t,
+    typename _Set_Meta = nullsetmeta_t>
+class cl_reference {
+public:
+    using key_type = _Key;
+    using val_type = _Val;
+    using meta_type = _Meta;
+    using set_meta_type = _Set_Meta;
+
+    using cl_id_type = key_type;
+
+    constexpr static std::size_t cl_size = _CL_Size;
+
+protected:
+    const std::size_t offset_;
+    cl_id_type & cl_id_;
+    val_type * vals_;
+    meta_type * meta_;
+    set_meta_type * set_meta_;
+    gdakis::atomic<unsigned, _Sco> flags_;
+
+    enum states {
+        dirty = 1
+    };
+
+public:
+    template<typename __Key = _Key>
+    __host__
+    __device__ constexpr static std::enable_if_t<std::is_integral_v<__Key> and std::is_same_v<__Key, _Key>, __Key>
+    invalid_key() noexcept {
+        return static_cast<key_type>(-1);
+    }
+
+    template<typename __Key = _Key>
+    __host__
+    __device__ constexpr static std::enable_if_t<!std::is_integral_v<__Key> and std::is_same_v<__Key, _Key>, __Key>
+    invalid_key() noexcept {
+        return key_type::invalid();
+    }
+
+    __host__ __device__ constexpr static cl_id_type invalid_cl_id() noexcept { return invalid_key(); }
+
+    __host__ __device__ cl_reference(
+        const std::size_t, cl_id_type &, val_type *, meta_type *, set_meta_type *) noexcept;
+
+    __host__ __device__ std::size_t cl_buffer_offset() const noexcept;
+
+    __host__ __device__ cl_id_type & cl_id() noexcept;
+
+    __host__ __device__ val_type * vals() noexcept;
+
+    __host__ __device__ void mark_dirty() noexcept;
+
+    __host__ __device__ void mark_clean() noexcept;
+
+    __host__ __device__ bool is_dirty() const noexcept;
+
+    __host__ __device__ void reset() noexcept;
+
+    __host__ __device__ void invalidate() noexcept;
+
+    template<typename __Meta = _Meta>
+    __host__
+    __device__ std::enable_if_t<!std::is_same_v<__Meta, nullmeta_t> and std::is_same_v<__Meta, _Meta>, __Meta &>
+    meta() noexcept;
+
+    template<typename __Set_Meta = _Set_Meta>
+    __host__ __device__
+    std::enable_if_t<!std::is_same_v<__Set_Meta, nullsetmeta_t> and std::is_same_v<__Set_Meta, _Set_Meta>, __Set_Meta &>
+    set_meta() noexcept;
+};
+
+}}
+
+#include "impl/cl_reference"
+
+GDAKIS_ADSC_SIMPLE_EXPORT_NS(gdakis::adsc, cl_reference)
+
+#endif

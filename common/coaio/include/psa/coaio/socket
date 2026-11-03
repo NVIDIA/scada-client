@@ -1,0 +1,280 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_SOCKET
+#define PSA_COAIO_SOCKET
+
+//! @file socket
+
+#include <array>
+
+#include <psa/coaio/concepts>
+#include <psa/coaio/types>
+#include <psa/futures>
+#include <sys/socket.h>
+
+namespace psa { namespace coaio {
+
+//! @brief Base socket class that includes common types
+struct base_socket {
+    //! @brief Socket domains
+    enum class domain : int {
+        //! UNIX
+        local = AF_UNIX,
+        //! IPv4
+        ipv4 = AF_INET,
+        //! IPv6
+        ipv6 = AF_INET6
+    };
+
+    //! @brief Socket transport types
+    enum class type : int {
+        //! Connection oriented (e.g., TCP)
+        stream = SOCK_STREAM,
+        //! Unreliable datagram (e.g., UDP)
+        datagram = SOCK_DGRAM,
+        //! Connection oriented preserving message boundaries
+        seq_packet = SOCK_SEQPACKET,
+        //! Raw (e.g., IP)
+        raw = SOCK_RAW,
+        //! Reliable datagram
+        reliable_datagram = SOCK_RDM,
+        //! Level-2 protocol
+        packet = SOCK_PACKET,
+    };
+
+    //! @brief Network address for different socket domains
+    template<domain>
+    struct address;
+};
+
+//! @brief A network socket class
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+class socket : public base_socket {
+public:
+    //! @brief Asynchronous result type for socket operations
+    template<typename _Tp = none_type>
+    using result = psa::futures::result<_Tp, int>;
+
+protected:
+    //! @brief Scheduler handle associated to the socket
+    typename _Sched::handle_type handle_;
+
+    template<size_t _N>
+    result<std::tuple<size_t, size_t>> receive_file_descriptors(int * fd_array, void * buffer, size_t size) noexcept;
+
+    socket(const socket &) = delete;
+
+    //! @brief Makes a socket from a file descriptor
+    //!
+    //! @param sched Scheduler in charge of initiating/completing socket operations
+    //! @param fd File descriptor associated to the socket
+    //! @returns `ok` with the socket if succeeded, or `error` containing the `errno` value otherwise
+    static result<socket> make(_Sched & sched, int fd) noexcept;
+
+public:
+    //! @brief Creates a new new socket associated to an scheduling domain
+    //!
+    //! @param handle Scheduler handle associated with the socket
+    socket(typename _Sched::handle_type && handle) noexcept;
+
+//! @brief Defaulted move constructor
+#pragma nv_exec_check_disable
+    socket(socket &&) noexcept = default;
+
+    //! @brief Socket destructor
+    ~socket();
+
+    //! @brief Builds a new socket within an scheduling domain
+    //!
+    //! @param sched Scheduler in charge of initiating/completing socket operations
+    //! @param domain Socket domain
+    //! @param type Socket type
+    static result<socket> make(_Sched & sched, domain domain, type type) noexcept;
+
+    //! @brief Defaulted move operator
+    socket & operator=(socket &&) noexcept = default;
+
+    //! @brief Connects the socket to the end specified by the address
+    //!
+    //! @param address Generic socket address to connect to
+    //! @param address_len Size (in bytes) of the address passed as first parameter
+    //! @returns `ok` if connection was established, or `error` containing the `errno` value otherwise
+    result<> connect(sockaddr * address, socklen_t address_len) noexcept;
+
+    //! @brief Binds the socket to a local address
+    //! @param address Generic socket address to connect to
+    //! @param address_len Size (in bytes) of the address passed as first parameter
+    //! @returns `ok` if the socket was bounded, or `error` containing the `errno` value otherwise
+    result<> bind(sockaddr * address, socklen_t address_len) noexcept;
+
+    //! @brief Start listening for connections on the socket
+    //! @param backlog Number of pending connections before start dropping new requests
+    //! @returns `ok` if the socket entered a listening state, or `error` containing the `errno` value otherwise
+    result<> listen(int backlog) noexcept;
+
+    //! @brief Accepts an incoming connection on this socket
+    //!
+    //! @tparam _Other Scheduler handling the socket associated to the connection
+    //! @param sched Scheduler in charge of initiating/completing the operations of the socket associated to the incoming connection
+    //! @param address Generic socket address to store the information about the connection
+    //! @param address_len Size (in bytes) of the address passed as second parameter
+    //! @returns `ok` with the socket associated to the connection if succeeded, or `error` containing the `errno` value otherwise
+    template<typename _Other = _Sched>
+#if defined(__cpp_concepts)
+        requires Scheduler<_Other>
+#endif
+    result<socket<_Other>> accept(_Other & sched, sockaddr * address, socklen_t * address_len) noexcept;
+
+    //! @brief Reads data from the socket
+    //!
+    //! @param buffer Memory buffer where to read the incoming data to
+    //! @param size Size (in bytes) of the buffer passed as first parameter
+    //! @param address Pointer to address where to store the source of the message
+    //! @returns `ok` with the number of bytes read, or `errno` containing the `errno` value otherwise
+    template<domain _Domain>
+    result<size_t> receive_message(void * buffer, size_t size, typename address<_Domain>::type & address) noexcept;
+
+    //! @brief Writes data to the socket
+    //!
+    //! @param buffer Memory buffer where to write the outgoing data from
+    //! @param size Size (in bytes) of the buffer passed as first parameter
+    //! @param address Address of the destination of the message
+    //! @returns `ok` with the number of bytes written, or `errno` containing the `errno` value otherwise
+    template<domain _Domain>
+    result<size_t> send_message(
+        const void * buffer, size_t size, const typename address<_Domain>::type & address) noexcept;
+
+    //! @brief Reads data from the socket
+    //!
+    //! @param buffer Memory buffer where to read the incoming data to
+    //! @param size Size (in bytes) of the buffer passed as first parameter
+    //! @returns `ok` with the number of bytes read, or `errno` containing the `errno` value otherwise
+    result<size_t> read(void * buffer, size_t size) noexcept;
+
+    //! @brief Reads an object from the socket
+    //!
+    //! @tparam _Tp Type of the object to read
+    //! @param object Reference to the object being read
+    //! @return `ok` if the object was read, or `error` containing the `errno` value otherwise
+    template<typename _Tp>
+    result<> read(_Tp & object) noexcept;
+
+    //! @brief Writes data to the socket
+    //!
+    //! @param buffer Memory buffer where to write the outgoing data from
+    //! @param size Size (in bytes) of the buffer passed as first parameter
+    //! @returns `ok` with the number of bytes written, or `errno` containing the `errno` value otherwise
+    result<size_t> write(const void * buffer, size_t size) noexcept;
+
+    //! @brief Reads an object from the socket
+    //!
+    //! @tparam _Tp Type of the object to read
+    //! @param object Reference to the object being read
+    //! @return `ok` if the object was read, or `error` containing the `errno` value otherwise
+    template<typename _Tp>
+    result<> write(const _Tp & object) noexcept;
+
+    //! @brief Gets information about the address bound to the socket
+    //!
+    //! @param address Generic socket address to store the information about the socket
+    //! @param address_len Size (in bytes) of the address passed as first parameter
+    //! @returns `ok` with the size of the address associated to the socket, or `error` containing the `errno` value otherwise
+    result<socklen_t> name(sockaddr * address, socklen_t address_len) noexcept;
+
+    //! @brief Receives a file descriptor and an associated message through the socket
+    //!
+    //! @param fd_array Reference to the file descriptor array being received
+    //! @param buffer Memory buffer where to write the associated message
+    //! @param size Size (in bytes) of the memory buffer passed as second parameter
+    //! @details Successfully received descriptors have `FD_CLOEXEC` set. On error, received descriptors are closed and
+    //! every entry in `fd_array` is set to -1. `EMSGSIZE` reports truncated ancillary data; `ECOMM` reports malformed or
+    //! unsupported ancillary data, multiple `SCM_RIGHTS` headers, or more descriptors than `fd_array` can hold.
+    //! @return `ok` with the number of bytes read, or `error` containing the `errno` value otherwise
+    template<size_t _N>
+    result<std::tuple<size_t, size_t>> receive_file_descriptor_array(
+        std::array<int, _N> & fd_array, void * buffer, size_t size) noexcept;
+
+    //! @brief Receives a file descriptor and an associated object through the socket
+    //!
+    //! @tparam Type of the object being received
+    //! @param fd_array Reference to the file descriptor array being received
+    //! @param object Reference to the object being read
+    //! @details Successfully received descriptors have `FD_CLOEXEC` set. On error, received descriptors are closed and
+    //! every entry in `fd_array` is set to -1. `EMSGSIZE` reports truncated ancillary data; `ECOMM` reports malformed or
+    //! unsupported ancillary data, multiple `SCM_RIGHTS` headers, or more descriptors than `fd_array` can hold. `EIO`
+    //! reports that the associated message size does not match the object size.
+    //! @return `ok` if an object was read, or `error` containing the `errno` value otherwise
+    template<size_t _N, typename _Tp>
+    result<size_t> receive_file_descriptor_array(std::array<int, _N> & fd_array, _Tp & object) noexcept;
+
+    //! @brief Receives a file descriptor and an associated message through the socket
+    //!
+    //! @param fd File descriptor being received
+    //! @param buffer Memory buffer where to write the associated message
+    //! @param size Size (in bytes) of the memory buffer passed as second parameter
+    //! @details A successfully received descriptor has `FD_CLOEXEC` set. On error, a received descriptor is closed and
+    //! `fd` is set to -1. `EMSGSIZE` reports truncated ancillary data; `ECOMM` reports malformed or unsupported ancillary
+    //! data, multiple `SCM_RIGHTS` headers, or more than one descriptor.
+    //! @return `ok` with the number of bytes read, or `error` containing the `errno` value otherwise
+    result<std::tuple<size_t, size_t>> receive_file_descriptor(int & fd, void * buffer, size_t size) noexcept;
+
+    //! @brief Receives a file descriptor and an associated object through the socket
+    //!
+    //! @tparam Type of the object being received
+    //! @param fd Reference to the file descriptor being received
+    //! @param object Reference to the object being read
+    //! @details A successfully received descriptor has `FD_CLOEXEC` set. On error, a received descriptor is closed and
+    //! `fd` is set to -1. `EMSGSIZE` reports truncated ancillary data; `ECOMM` reports malformed or unsupported ancillary
+    //! data, multiple `SCM_RIGHTS` headers, or more than one descriptor. `EIO` reports that the associated message size
+    //! does not match the object size.
+    //! @return `ok` if an object was read, or `error` containing the `errno` value otherwise
+    template<typename _Tp>
+    result<size_t> receive_file_descriptor(int & fd, _Tp & object) noexcept;
+
+    //! @brief Sends an array of file descriptors and an associated message through the socket
+    //!
+    //! @param fd_array File descriptor array being sent
+    //! @param buffer Memory buffer where to read the associated message from
+    //! @param size Size (in bytes) of the memory buffer passed as second parameter
+    //! @return `ok` with the number of bytes written, or `error` containing the `errno` value otherwise
+    template<size_t _N>
+    result<size_t> send_file_descriptor_array(
+        const std::array<int, _N> & fd_array, const void * buffer, size_t size) noexcept;
+
+    //! @brief Sends an array of file descriptors and an associated message through the socket
+    //!
+    //! @param fd_array File descriptor array being sent
+    //! @param object Reference to the object being read
+    //! @return `ok` with the number of bytes written, or `error` containing the `errno` value otherwise
+    template<size_t _N, typename _Tp>
+    result<> send_file_descriptor_array(const std::array<int, _N> & fd_array, const _Tp & object) noexcept;
+
+    //! @brief Sends a file descriptor and an associated message through the socket
+    //!
+    //! @param fd File descriptor being sent
+    //! @param buffer Memory buffer where to read the associated message from
+    //! @param size Size (in bytes) of the memory buffer passed as second parameter
+    //! @return `ok` with the number of bytes written, or `error` containing the `errno` value otherwise
+    result<size_t> send_file_descriptor(int fd, const void * buffer, size_t size) noexcept;
+
+    //! @brief Sends a file descriptor and an associated object through the socket
+    //!
+    //! @tparam Type of the object being sent
+    //! @param fd File descriptor being sent
+    //! @param object Object being sent
+    //! @return `ok` if an object was sent, or `error` containing the `errno` value otherwise
+    template<typename _Tp>
+    result<> send_file_descriptor(int fd, const _Tp & object) noexcept;
+};
+
+}}
+
+#include "impl/socket"
+
+#endif

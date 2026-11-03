@@ -1,0 +1,23 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP__CUDA_COMPAT
+#define SCADA_SWAP__CUDA_COMPAT
+
+//! @file scada/swap/__cuda_compat
+//!
+//! This file conditionally defines `__host__` and `__device__` to empty keywords if not compiling with NVCC
+
+#if !defined(__CUDACC__)
+#  if !defined(__host__)
+#    define __host__
+#  endif
+
+#  if !defined(__device__)
+#    define __device__
+#  endif
+#endif
+
+#endif

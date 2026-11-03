@@ -1,0 +1,173 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_SCHEDULER_EPOLL
+#define PSA_COAIO_SCHEDULER_EPOLL
+
+#include <psa/coaio/mcs>
+#include <psa/coaio/types>
+#include <psa/futures>
+
+#include <sys/epoll.h>
+
+#include <list>
+#include <memory>
+#include <vector>
+
+#include <atomic>
+
+//! @file epoll
+
+namespace psa { namespace coaio { namespace scheduler {
+
+//! @brief An I/O scheduler based on the `epoll` system call
+class epoll {
+public:
+    //! @brief Result type returned by the scheduler operations
+    template<typename _Ok = none_type>
+    using result = psa::result<_Ok, int>;
+
+    class handle_type;
+
+#if defined(__psa_use_coroutines)
+    //! @brief A handle to the scheduler dispatcher coroutine
+    struct dispatcher_handle : public std::coroutine_handle<> {
+
+        struct promise_type;
+        dispatcher_handle(std::coroutine_handle<> &&) noexcept;
+        dispatcher_handle(dispatcher_handle &&) noexcept = default;
+
+        dispatcher_handle & operator=(std::nullptr_t) noexcept;
+    };
+#endif
+
+protected:
+    struct sched_type {
+        using ptr = std::shared_ptr<sched_type>;
+
+        ~sched_type() noexcept;
+#if defined(__psa_use_coroutines)
+        void dispatcher() noexcept;
+#endif
+
+        static auto make() noexcept;
+
+        result<> register_file_descriptor(int) const noexcept;
+        void unregister_file_descriptor(int) noexcept;
+        void disable() noexcept;
+
+        enum class event_type : uint32_t {
+            read = EPOLLIN,
+            write = EPOLLOUT
+        };
+
+    private:
+        friend class handle_type;
+
+#if defined(__psa_use_coroutines)
+        struct wait_type {
+            using wait_list = std::list<std::coroutine_handle<>>;
+            wait_list read_;
+            wait_list write_;
+            int read_in_event_;
+            int read_out_event_;
+            int write_in_event_;
+            int write_out_event_;
+        };
+        using wait_table = std::vector<wait_type>;
+
+        int fd_;
+        mcs lock_;
+        wait_table wait_table_;
+        unsigned wait_count_;
+
+        using ready_list = std::list<std::coroutine_handle<>>;
+        std::mutex ready_mutex_;
+        ready_list ready_list_;
+#endif
+
+        sched_type(int) noexcept;
+    };
+
+public:
+    //! @brief Events supported by the scheduler
+    using event_type = sched_type::event_type;
+
+    //! @brief Handle for file descriptors managed by the scheduler
+    class handle_type {
+    public:
+        //! @brief Events supported by the handle
+        using event_type = sched_type::event_type;
+
+        //! @brief Result type returned by the handle operations
+        template<typename _Ok = none_type>
+        using result = psa::futures::result<_Ok, int>;
+
+    protected:
+        int fd_;
+        sched_type::ptr sched_;
+
+        handle_type(const sched_type::ptr &, int) noexcept;
+        handle_type(const handle_type &) = delete;
+
+        friend class epoll;
+
+    public:
+        //! @brief Move constructor
+        handle_type(handle_type &&) noexcept;
+        //! @brief Destructor
+        ~handle_type() noexcept;
+
+        //! @brief File descriptor associated to the handle
+        //! @return File descriptor associated to the handle
+        int fd() const noexcept;
+
+        //! @brief Waits (and yields execution) until an event of the requested type is available on the file descriptor
+        //!
+        //! @tparam _Fn Callable object to execute when the requested event is received
+        //! @param event_type Type of event to trigger the execution of the callback
+        //! @param callback Callable object to execute whenever the requested event is available on the file descriptor
+        //! @returns A future for the result type returned by the callable object
+        template<typename _Fn>
+        psa::futures::from_sync_t<std::invoke_result_t<_Fn>> await(const event_type &, _Fn &&) noexcept;
+
+        //! @brief Re-inserts the handle into the the wait list for epoll
+        epoll::result<> rearm() const noexcept;
+    };
+
+protected:
+    sched_type::ptr scheduler_;
+
+    epoll(sched_type::ptr &&) noexcept;
+
+public:
+//! @brief Defaulted copy constructor
+#pragma nv_exec_check_disable
+    epoll(const epoll &) = default;
+
+//! @brief Defaulted move constructor
+#pragma nv_exec_check_disable
+    epoll(epoll &&) = default;
+
+    //! @brief Registers a file descriptor into the scheduler
+    //!
+    //! @param fd File descriptor to register
+    //! @returns `ok` with the handle associated to the file descriptor, or `error` with an POSIX error value otherwise
+    result<handle_type> register_file_descriptor(int fd) const noexcept;
+
+    //! @brief Creates a new scheduler
+    //!
+    //! @returns `ok` with the scheduler, or `error` with a POSIX error value otherwise
+    static result<epoll> create() noexcept;
+
+    //! @brief Disables the scheduler (cannot be undone)
+    void disable() const noexcept;
+};
+
+}}}
+
+#include "../impl/epoll"
+
+#endif

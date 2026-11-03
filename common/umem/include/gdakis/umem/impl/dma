@@ -1,0 +1,114 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_IMPL_DMA
+#define GDAKIS_UMEM_IMPL_DMA
+
+#include <assert.h>
+#include <errno.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+namespace gdakis::umem {
+
+/** fd */
+
+inline constexpr fd::fd(int n) noexcept : fd_(n) {}
+
+inline constexpr fd::fd(fd && other) noexcept : fd_(other.fd_) {
+    other.fd_ = -1;
+}
+
+inline fd::~fd() noexcept {
+    if (fd_ >= 0)
+        ::close(fd_);
+}
+
+inline constexpr int fd::handle() const {
+    return fd_ < 0 ? -1 : fd_;
+}
+
+inline constexpr int fd::err() const {
+    return fd_ < 0 ? fd_ : 0;
+}
+
+inline fd & fd::operator=(fd && other) noexcept {
+    if (fd_ >= 0)
+        ::close(fd_);
+    fd_ = other.fd_;
+    other.fd_ = -1;
+    return *this;
+}
+
+/** buffer */
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline buffer<_Tp, _Ptr>::buffer(fd && fd, ptr_type<_Tp> && mem) noexcept
+    : fd_(std::move(fd)),
+      mem_(std::move(mem)),
+      size_(fd_.err() ? 0 : lseek(fd_.handle(), 0, SEEK_END)) {}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline buffer<_Tp, _Ptr>::buffer(int err) noexcept : fd_(err),
+                                                     mem_(nullptr),
+                                                     size_(0) {}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline buffer<_Tp, _Ptr>::buffer(buffer && other) noexcept
+    : fd_(std::move(other.fd_)),
+      mem_(std::move(other.mem_)),
+      size_(other.size_) {
+    other.size_ = 0;
+    assert(other.mem_ == nullptr);
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline buffer<_Tp, _Ptr>::~buffer() {
+    /* Force memory release first */
+    mem_ = nullptr;
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline _Tp * buffer<_Tp, _Ptr>::get() const noexcept {
+    return mem_.get();
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline constexpr int buffer<_Tp, _Ptr>::handle() const noexcept {
+    return fd_.handle();
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline constexpr int buffer<_Tp, _Ptr>::retval() const noexcept {
+    return fd_.err();
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline constexpr std::size_t buffer<_Tp, _Ptr>::size() const noexcept {
+    return size_ / sizeof(_Tp);
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline constexpr bool buffer<_Tp, _Ptr>::operator==(std::nullptr_t) const noexcept {
+    return mem_ == nullptr;
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline constexpr bool buffer<_Tp, _Ptr>::operator!=(std::nullptr_t) const noexcept {
+    return mem_ != nullptr;
+}
+
+template<typename _Tp, template<typename> typename _Ptr>
+inline buffer<_Tp, _Ptr> & buffer<_Tp, _Ptr>::operator=(std::nullptr_t) noexcept {
+    // Let smart pointer deleter handle memory cleanup
+    mem_ = nullptr;
+    fd_ = fd(-EINVAL);
+    size_ = 0;
+
+    return *this;
+}
+
+}
+#endif

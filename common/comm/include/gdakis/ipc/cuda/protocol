@@ -1,0 +1,118 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IPC_CUDA_PROTOCOL
+#define GDAKIS_IPC_CUDA_PROTOCOL
+
+#include <cstdint>
+#include <psa/result>
+
+#include <gdakis/ipc/shmem>
+#include <gdakis/protocol>
+
+namespace gdakis::comm::ipc::cuda {
+
+#pragma pack(push, 1)
+template<operation>
+struct response {};
+
+template<operation>
+struct request {};
+
+template<>
+struct request<operation::register_request_buffers> {
+    using control_type = ipc::ptr<umem::cuda, request_buffer_control<device_type::cuda>>;
+    using buffer_type = ipc::ptr<umem::cuda, uint8_t>;
+
+    struct ancillary_type : std::array<int, 2> {
+        constexpr void set(const typename control_type::ancillary_type & control,
+            const typename buffer_type::ancillary_type & buffer) noexcept {
+            std::get<0>(*this) = std::get<0>(control);
+            std::get<1>(*this) = std::get<0>(buffer);
+        }
+
+        template<std::size_t _N>
+        constexpr void set(const std::array<int, _N> & source) noexcept {
+            static_assert(_N >= 2, "File descriptor array too small to be ancillary data for submission buffer");
+            std::get<0>(*this) = std::get<0>(source);
+            std::get<1>(*this) = std::get<1>(source);
+        }
+
+        constexpr auto control() const noexcept { return typename control_type::ancillary_type { std::get<0>(*this) }; }
+        constexpr auto buffer() const noexcept { return typename buffer_type::ancillary_type { std::get<1>(*this) }; }
+    };
+
+    control_type::handle_type control;
+    buffer_type::handle_type buffer;
+};
+
+template<>
+struct request<operation::register_memory_buffer> {
+    using buffer_type = ipc::dma_ptr<umem::cuda, uint8_t>;
+
+    struct ancillary_type : public buffer_type::ancillary_type {
+        template<std::size_t _N>
+        constexpr void set(const std::array<int, _N> & source) noexcept {
+            static_assert(_N >= 1, "File descriptor array too small to be ancillary data for submission buffer");
+            std::get<0>(*this) = std::get<0>(source);
+            std::get<1>(*this) = std::get<1>(source);
+        }
+    };
+
+    buffer_type::handle_type buffer;
+};
+
+template<>
+struct request<operation::register_io_buffer_pool> {
+    using buffer_type = ipc::dma_ptr<umem::cuda, uint8_t>;
+    using status_type = ipc::dma_ptr<umem::cuda, int32_t>;
+
+    struct ancillary_type : public std::array<int, 4> {
+
+        constexpr void set(const typename buffer_type::ancillary_type & buffer,
+            const typename status_type::ancillary_type & status) noexcept {
+            std::get<0>(*this) = std::get<0>(buffer);
+            std::get<1>(*this) = std::get<1>(buffer);
+            std::get<2>(*this) = std::get<0>(status);
+            std::get<3>(*this) = std::get<1>(status);
+        }
+
+        template<std::size_t _N>
+        constexpr void set(const std::array<int, _N> & source) noexcept {
+            static_assert(_N >= 4, "File descriptor array too small to be ancillary data for submission buffer");
+            std::get<0>(*this) = std::get<0>(source);
+            std::get<1>(*this) = std::get<1>(source);
+            std::get<2>(*this) = std::get<2>(source);
+            std::get<3>(*this) = std::get<3>(source);
+        }
+
+        constexpr auto buffer() const noexcept {
+            return typename buffer_type::ancillary_type { std::get<0>(*this), std::get<1>(*this) };
+        }
+        constexpr auto status() const noexcept {
+            return typename status_type::ancillary_type { std::get<2>(*this), std::get<3>(*this) };
+        }
+    };
+
+    buffer_type::handle_type buffer;
+    status_type::handle_type status;
+};
+
+#pragma pack(pop)
+
+struct backend_type {
+    static constexpr gdakis::comm::device_type device_type = gdakis::comm::device_type::cuda;
+    static constexpr gdakis::comm::transport_type transport_type = gdakis::comm::transport_type::ipc;
+
+    template<operation _Op>
+    using request_type = request<_Op>;
+
+    template<operation _Op>
+    using response_type = response<_Op>;
+};
+
+}
+
+#endif

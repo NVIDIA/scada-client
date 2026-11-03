@@ -1,0 +1,19 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM___CUDA_COMPAT
+#define GDAKIS_UMEM___CUDA_COMPAT
+
+#if !defined(__CUDACC__)
+#  if !defined(__host__)
+#    define __host__
+#  endif
+
+#  if !defined(__device__)
+#    define __device__
+#  endif
+#endif
+
+#endif

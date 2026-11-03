@@ -1,0 +1,279 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP___IMPL_STORE
+#define SCADA_SWAP___IMPL_STORE
+
+#include <climits>
+#include <sstream>
+#include <string>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(store) {
+
+namespace detail {
+
+// Helper function to get default socket path based on CUDA_VISIBLE_DEVICES
+// This matches the server-side logic in domain.cpp
+// Uses the first GPU in the CUDA_VISIBLE_DEVICES list
+inline std::string get_default_socket_path() {
+    const char * cuda_visible_devices = std::getenv("CUDA_VISIBLE_DEVICES");
+
+    int gpu_id = 0; // Default to GPU 0
+
+    if (cuda_visible_devices != nullptr && cuda_visible_devices[0] != '\0') {
+        // Parse the comma-separated list of GPU IDs and use the first valid one
+        std::string devices_str(cuda_visible_devices);
+        std::istringstream iss(devices_str);
+        std::string token;
+
+        while (std::getline(iss, token, ',')) {
+            // Trim whitespace
+            token.erase(0, token.find_first_not_of(" \t\n\r\f\v"));
+            token.erase(token.find_last_not_of(" \t\n\r\f\v") + 1);
+
+            if (token.empty())
+                continue;
+
+            try {
+                int id = std::stoi(token);
+                if (id >= 0) {
+                    gpu_id = id;
+                    break; // Use first valid GPU ID
+                }
+            } catch (const std::exception &) {
+                // Invalid GPU ID, skip it
+            }
+        }
+    }
+
+    // Allow custom socket directory via SCADA_SOCKET_DIR environment variable
+    const char * custom_socket_dir = std::getenv("SCADA_SOCKET_DIR");
+    std::string socket_dir;
+
+    if (custom_socket_dir != nullptr && custom_socket_dir[0] != '\0') {
+        socket_dir = custom_socket_dir;
+    } else {
+        socket_dir = "/var/run/scada";
+    }
+
+    // Construct the socket path: {socket_dir}/scadad.swap.gpu{N}.sock
+    return socket_dir + "/scadad.swap.gpu" + std::to_string(gpu_id) + ".sock";
+}
+
+} // namespace detail
+
+template<io::socket::domain _Domain>
+const scada::uuid store<_Domain>::uuid_(std::string(name) + ":v" + std::to_string(version));
+
+template<io::socket::domain _Domain>
+inline store<_Domain>::store(io::scheduler && scheduler, io::socket && socket, io_buffer_pool_handle && io_buffer_pool,
+    autobatch_handle && autobatch) noexcept
+    : scheduler_(std::move(scheduler)),
+      conn_(std::move(socket)),
+      io_buffer_pool_(std::move(io_buffer_pool)),
+      autobatch_(std::move(autobatch)),
+      io_buffer_pool_ticket_(0) {}
+
+template<io::socket::domain _Domain>
+inline store<_Domain>::store(store && rhs) noexcept
+    : scheduler_(std::move(rhs.scheduler_)),
+      conn_(std::move(rhs.conn_)),
+      io_buffer_pool_(std::move(rhs.io_buffer_pool_)),
+      autobatch_(std::move(rhs.autobatch_)) {}
+
+template<io::socket::domain _Domain>
+inline store<_Domain>::~store() noexcept {
+    for (auto it = slabs_.begin(); it != slabs_.end(); it++) {
+        free_slab(*it);
+    }
+}
+
+template<io::socket::domain _Domain>
+io::socket & store<_Domain>::socket() noexcept {
+    return conn_;
+}
+
+template<io::socket::domain _Domain>
+const scada::uuid & store<_Domain>::id() noexcept {
+    return uuid_;
+}
+
+namespace detail {
+
+template<io::socket::domain>
+struct store_factory;
+
+template<>
+struct store_factory<io::socket::domain::local> {
+    // Overload with no arguments - uses default socket path
+    inline result<scada::swap::store<io::socket::domain::local>> operator()() noexcept {
+        return (*this)(get_default_socket_path());
+    }
+
+    // Overload with explicit address
+    inline result<scada::swap::store<io::socket::domain::local>> operator()(const std::string & address) noexcept {
+        using store_type = scada::swap::store<io::socket::domain::local>;
+        auto scheduler = io::scheduler::create();
+        if (scheduler.is_err()) {
+            SWAP_LOG(LOCSTR, "io scheduler creation in error state during store build");
+            return result<store_type>::err(scheduler.err());
+        }
+
+        auto socket = io::socket::make(scheduler.ok(), io::socket::domain::local, io::socket::type::stream).sync();
+        if (socket.is_err()) {
+            SWAP_LOG(LOCSTR, "socket creation in error state during store build");
+            return result<store_type>::err(socket.err());
+        }
+
+        auto addr = io::socket::address<io::socket::domain::local>::from_string(address);
+        if (addr.is_err())
+            return result<store_type>::err(addr.err());
+
+        auto sock_addr = addr.ok();
+        return socket.ok()
+            .connect(reinterpret_cast<::sockaddr *>(&sock_addr), sizeof(sock_addr))
+            .and_then([&](auto) {
+                scada::uuid::value_type bytes;
+                auto res = socket.ok().read(bytes).sync();
+                if (res.is_err()) {
+                    SWAP_LOG(LOCSTR, "socket read in error state during store build");
+                    return result<store_type>::err(res.err());
+                }
+                scada::uuid uuid(std::move(bytes));
+                if (uuid != store_type::id()) {
+                    SWAP_LOG(LOCSTR, "store id in error state during store build");
+                    return result<store_type>::err(EINVAL);
+                }
+
+                // Request protocol version from server
+                gdakis::comm::message<gdakis::comm::operation::get_protocol_version,
+                    gdakis::comm::ipc::cpu::backend_type>
+                    protocol_request;
+                auto protocol_send_res = socket.ok().write(protocol_request).sync();
+                if (protocol_send_res.is_err()) {
+                    SWAP_LOG(LOCSTR, "failed to send protocol version request during store build");
+                    return result<store_type>::err(protocol_send_res.err());
+                }
+
+                // Read protocol version response
+                gdakis::comm::acknowledge<gdakis::comm::operation::get_protocol_version,
+                    gdakis::comm::ipc::cpu::backend_type>
+                    protocol_ack;
+                auto protocol_read_res = socket.ok().read(protocol_ack).sync();
+                if (protocol_read_res.is_err()) {
+                    SWAP_LOG(LOCSTR, "failed to read protocol version response during store build");
+                    return result<store_type>::err(protocol_read_res.err());
+                }
+
+                // Verify protocol version response
+                if (protocol_ack.status != gdakis::comm::status_type::ok) {
+                    SWAP_LOG(LOCSTR, "server returned error for protocol version request");
+                    return result<store_type>::err(EPROTO);
+                }
+
+                // Log the protocol version for debugging
+                SWAP_LOG(LOCSTR, "server protocol version:", protocol_ack.res.version.major, ".",
+                    protocol_ack.res.version.minor);
+
+                // Check if we support this protocol version (for now, we accept any version)
+                // Future: Add version compatibility checking here
+
+                auto io_buffer_pool = store_type::io_buffer_pool_handle::build(
+                    store_type::control_wqe_size_, [](unsigned, auto * data) { *data = 0; },
+                    [](unsigned, auto * status) { *status = status_type::pending; });
+                if (io_buffer_pool.is_err()) {
+                    SWAP_LOG(LOCSTR, "control io buffer pool build in error state during store build");
+                    return result<store_type>::err(io_buffer_pool.err());
+                }
+                auto ret = io_buffer_pool.ok().send_to_server(socket.ok()).sync();
+                if (ret.is_err()) {
+                    SWAP_LOG(LOCSTR, "control io buffer pool registration in error state during store build");
+                    return result<store_type>::err(ret.err());
+                }
+                auto autobatch
+                    = store_type::autobatch_type::handle::build(store<io::socket::domain::local>::control_wqe_size_);
+                if (autobatch.is_err()) {
+                    SWAP_LOG(LOCSTR, "control autobatch build in error state during store build");
+                    return result<store_type>::err(autobatch.err());
+                }
+
+                ret = autobatch.ok().send_to_server(socket.ok()).sync();
+                if (ret.is_err()) {
+                    SWAP_LOG(LOCSTR, "control autobatch registration in error state during store build");
+                    return result<store_type>::err(ret.err());
+                }
+
+                return result<store_type>::ok(
+                    scheduler.take_ok(), socket.take_ok(), io_buffer_pool.take_ok(), autobatch.take_ok());
+            })
+            .sync();
+    }
+};
+
+}
+
+template<io::socket::domain _Domain>
+template<typename... Args>
+inline result<store<_Domain>> store<_Domain>::build(Args &&... args) noexcept {
+    return detail::store_factory<_Domain>()(std::forward<Args>(args)...);
+}
+
+template<io::socket::domain _Domain>
+template<typename _Tp>
+result<typename store<_Domain>::template slab<_Tp>> store<_Domain>::alloc(std::size_t n_elems) noexcept {
+    unsigned pos = 0;
+    bool pass = false;
+    do {
+        pos = io_buffer_pool_ticket_.fetch_add(1) % control_wqe_size_;
+        pass = bitmap_type::set(io_buffer_pool_freemap_, pos, gdakis::memory_order_seq_cst);
+    } while (!pass);
+
+    gdakis::atomic_ref<status_type>(io_buffer_pool_.get().status()[pos]).store(status_type::pending);
+    autobatch_.get()->push([&](wqe_type & wqe) {
+        wqe.op_ = operation::alloc;
+        wqe.alloc_.object_size_ = sizeof(_Tp);
+        wqe.alloc_.store_size_ = n_elems;
+        wqe.alloc_.io_id_ = io_buffer_pool_.id().value();
+        wqe.alloc_.io_offset_ = pos;
+    });
+    while (gdakis::atomic_ref<status_type>(io_buffer_pool_.get().status()[pos]).load(gdakis::memory_order_acquire)
+        == status_type::pending)
+        ;
+
+    auto ret = io_buffer_pool_.get().status()[pos] == status_type::ok
+        ? result<slab<_Tp>>::ok(*this, io_buffer_pool_.get().data()[pos], n_elems)
+        : result<slab<_Tp>>::err(ENOSYS);
+    bitmap_type::clear(io_buffer_pool_freemap_, pos, gdakis::memory_order_release);
+    if (ret.is_ok()) {
+        std::lock_guard<std::mutex> lock(slab_lock_);
+        [[maybe_unused]] auto it = slabs_.find(ret.ok().id());
+        assert(it == slabs_.end());
+        slabs_.insert(ret.ok().id());
+    } else {
+        SWAP_LOG(LOCSTR, "slab allocation failure observed by swap client");
+    }
+    return ret;
+}
+
+template<io::socket::domain _Domain>
+void store<_Domain>::free_slab(slab_id_type id) noexcept {
+    autobatch_.get()->push([&](wqe_type & wqe) {
+        wqe.op_ = operation::free;
+        wqe.free_.id_ = id;
+    });
+}
+template<io::socket::domain _Domain>
+void store<_Domain>::free(slab_id_type id) noexcept {
+    free_slab(id);
+    {
+        std::lock_guard<std::mutex> lock(slab_lock_);
+        slabs_.erase(id);
+    }
+}
+
+}}
+
+#endif

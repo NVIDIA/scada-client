@@ -1,0 +1,216 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_FUTURES_RESULT
+#define PSA_FUTURES_RESULT
+
+#if defined(__NVCC__) && !defined(FORCE_NVCC_COROUTINES)
+#  define __psa_disable_coroutines
+#endif
+
+#include <version>
+#if defined(__cpp_impl_coroutine) && defined(__cpp_lib_coroutine) && !defined(__psa_disable_coroutines)
+#  define __psa_use_coroutines
+#endif
+
+#if defined(__psa_use_coroutines)
+#  include <coroutine>
+#endif
+
+#include <optional>
+#include <type_traits>
+#include <variant>
+
+#include <psa/result>
+#include <psa/traits>
+
+//! @file psa/futures
+//! A result future for asynchronous operations
+//!
+//! A result future holds the state of an asynchronous operation
+//! that returns a `psa::result` when completed.
+
+namespace psa { namespace futures {
+
+#if !defined(__psa_use_coroutines)
+
+using dispatcher = std::tuple<>;
+
+#else
+
+using dispatcher = std::coroutine_handle<>;
+
+#endif
+
+#if defined(__cpp_concepts)
+
+#endif
+
+#if !defined(__psa_use_coroutines)
+
+template<typename _Ok, typename _Err>
+using result = ::psa::result<_Ok, _Err>;
+
+#else
+
+template<typename, typename>
+class result;
+
+#endif
+
+template<typename>
+struct from_sync;
+
+template<typename _Ok, typename _Err>
+struct from_sync<::psa::result<_Ok, _Err>> {
+    using type = result<_Ok, _Err>;
+};
+
+template<typename _Tp>
+using from_sync_t = typename from_sync<_Tp>::type;
+
+#if defined(__cpp_concepts)
+template<typename _Promise>
+concept promise = requires(_Promise p) {
+    { p.is_ready() } -> std::convertible_to<bool>;
+};
+
+template<typename _Handle>
+concept coroutine_handle = requires(_Handle h) { requires promise<decltype(h.promise())>; };
+#endif
+
+#if defined(__psa_use_coroutines)
+
+template<typename, typename>
+class result;
+
+//!
+//! @brief Type that represents an asynchronous operation that will return
+//! either success `Ok` or failure `Err`
+//!
+//! @tparam _Ok Success type
+//! @tparam _Err Failure type
+template<typename _Ok, typename _Err>
+class result {
+protected:
+    template<typename _Fn>
+    using require_same_err_t = result<typename traits::result::ok_output<_Fn, result>::ok_type, _Err>;
+
+    template<typename _Fn>
+    using require_same_ok_t = result<_Ok, typename traits::result::err_output<_Fn, result>::err_type>;
+
+public:
+    class promise_type;
+
+    template<typename _U, typename _V>
+    friend class result<_U, _V>::promise_type;
+
+    //! @brief @ref psa::result returned by the future when the asynchronous operations completes
+    using sync_type = ::psa::result<_Ok, _Err>;
+
+protected:
+    template<typename>
+    struct awaiter;
+    struct detached;
+
+    using pending_type = std::coroutine_handle<promise_type>;
+
+    struct result_type;
+    //using result_type = std::variant<pending_type, sync_type>;
+
+    //! @brief Pending coroutine if the operation is still pending, returned `psa::result`
+    //! if the associated coroutine already completed, or `std::nullopt_t` if the future
+    //! has been already synchronized
+    result_type result_;
+
+    result(const result &) = delete; //!< Deleted copy constructor
+
+    //! @brief Default constructor
+    //!
+    //! @param value Coroutine that produces the `psa::result` return value, this value
+    //! if already computed/produced
+    result(result_type && value) noexcept;
+
+public:
+    //! @brief Constructor from existing result
+    //!
+    //! @param value Value
+    result(sync_type && value) noexcept;
+
+    //! @brief Move constructor
+    result(result &&) noexcept;
+    //! @brief Destructor
+    ~result();
+
+    //! @brief Creates a `result` object that stores a success value
+    //!
+    //! @param value Success value
+    template<typename _Tp, typename = std::enable_if_t<std::is_convertible_v<_Tp, _Ok>>>
+    static result ok(_Tp && value) noexcept;
+
+    //! @brief Creates a `result` object that stores a success value
+    //!
+    //! @param args Arguments to pass to the success object constructor
+    template<typename... Args>
+    static result ok(Args &&... args) noexcept;
+
+    //! @brief Creates a `result` object that stores a failure value
+    //!
+    //! @param value Failure value
+    template<typename _Tp, typename = std::enable_if_t<std::is_convertible_v<_Tp, _Err>>>
+    static result err(_Tp && value) noexcept;
+
+    //! @brief Creates a `result` object that stores a failure value
+    //!
+    //! @param args Arguments to pass to the failure object constructor
+    template<typename... Args>
+    static result err(Args &&... args) noexcept;
+
+    //! @brief  `co_await` operator
+    //!
+    //! Upon return, the `co_await` operator returns the result of the asynchronous operation
+    auto operator co_await() noexcept;
+
+    //! @brief Synchronizes the future and returns the result
+    sync_type sync() noexcept;
+
+    //! @brief Maps a `result<T, Err>` to `result<S, Err>` by applying a function to a contained success value,
+    //! leaving a failure value untouched
+    //!
+    //! @param fn Callable that takes as input `_Ok` and returns a different type
+    template<typename _Fn>
+    result<std::invoke_result_t<_Fn, _Ok>, _Err> map(_Fn && fn) noexcept;
+
+    //! @brief Maps a `result<Ok, T>` to `result<Ok, S>` by applying a function to a contained failure value,
+    //! leaving a success value untouched
+    //!
+    //! @param fn Callable that takes as input `_Err` and returns a different type
+    template<typename _Fn>
+    result<_Ok, std::invoke_result_t<_Fn, _Err>> map_err(_Fn && fn) noexcept;
+
+    //! @brief Upon successful completion of the asynchronous operation, executes the callable
+    //! passed as argument
+    //!
+    //! @param fn Callable that takes as input `_Ok` and returns a new `psa::futures::result`
+    template<typename _Fn, typename... Args>
+    require_same_err_t<_Fn> and_then(_Fn && fn, Args &&...) noexcept;
+
+    //! @brief Upon completion with failure of the asynchronous operation, executes the callable
+    //! passed as argument
+    //!
+    //! @param fn Callable that takes as input `_Err` and returns a new `psa::futures::result`
+    template<typename _Fn, typename... Args>
+    require_same_ok_t<_Fn> or_else(_Fn && fn, Args &&...) noexcept;
+};
+
+#endif
+
+}}
+
+#if defined(__psa_use_coroutines)
+#  include "impl/futures"
+#endif
+
+#endif

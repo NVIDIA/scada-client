@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+pkgname='@PROJECT_NAME@-dev'
+pkgdesc='@PROJECT_DESCRIPTION@'
+arch=('x86_64')
+pkgver=@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@
+pkgrel=1
+
+source=('@PROJECT_NAME@-@PROJECT_VERSION@-Linux.tar.gz')
+sha256sums=('SKIP')
+
+depends=('gdakis-umem-dev=@GDAKIS_UTILS_UMEM_VERSION@')
+
+package() {
+    cd $srcdir/@PROJECT_NAME@-@PROJECT_VERSION@-Linux
+    find usr -type f -exec install -Dm 755 "{}" "$pkgdir/{}" \;
+}

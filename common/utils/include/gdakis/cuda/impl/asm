@@ -1,0 +1,45 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_IMPL_ASM
+#define GDAKIS_CUDA_IMPL_ASM
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(asm) {
+
+#if defined(__CUDACC__)
+
+namespace detail {
+
+template<typename T>
+static inline __device__
+typename std::enable_if<sizeof(T) == 4, int>::type
+__bfind(const T & value) noexcept
+{
+    int ret;
+    unsigned v = *(reinterpret_cast<unsigned *>(const_cast<T *>(&value)));
+    asm volatile("bfind.u32 %0, %1;" : "=r"(ret) : "r"(v));
+    return ret;
+}
+
+template<typename T>
+static inline __device__ typename std::enable_if<sizeof(T) == 8, int>::type __bfind(const T & value) noexcept {
+    int ret;
+    unsigned long long v = *(reinterpret_cast<unsigned long long *>(const_cast<T *>(&value)));
+    asm volatile("bfind.u64 %0, %1;" : "=r"(ret) : "l"(v));
+    return ret;
+}
+}
+
+template<typename _Tp>
+__device__ inline int bfind(const _Tp & value) noexcept {
+    return detail::__bfind(value);
+}
+
+#endif
+}
+}
+
+#endif

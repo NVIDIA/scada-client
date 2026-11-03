@@ -1,0 +1,591 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_IMPL_SOCKET
+#define PSA_COAIO_IMPL_SOCKET
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <tuple>
+
+#if defined(__psa_use_coroutines)
+#  include <fcntl.h>
+#endif
+#include <psa/coaio/concepts>
+#include <psa/futures>
+
+namespace psa { namespace coaio {
+
+template<>
+struct base_socket::address<base_socket::domain::local> {
+    using type = ::sockaddr_un;
+    static inline ::psa::result<type, int> from_string(const std::string & src) {
+        type addr;
+        // Validate path length - Unix domain sockets have a fixed-size sun_path field
+        if (src.length() >= sizeof(addr.sun_path)) {
+            return ::psa::result<type, int>::err(ENAMETOOLONG);
+        }
+        ::memset(&addr, 0, sizeof(type));
+        addr.sun_family = AF_UNIX;
+        ::strncpy(addr.sun_path, src.c_str(), sizeof(addr.sun_path) - 1);
+        return ::psa::result<type, int>::ok(addr);
+    }
+};
+
+template<>
+struct base_socket::address<base_socket::domain::ipv4> {
+    using type = ::sockaddr_in;
+    static inline ::psa::result<type, int> from_string(const std::string & src, unsigned port) {
+        type addr;
+        ::memset(&addr, 0, sizeof(type));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        return ::inet_aton(src.c_str(), &addr.sin_addr) == 1 ? ::psa::result<type, int>::ok(addr)
+                                                             : ::psa::result<type, int>::err(EINVAL);
+    }
+};
+
+template<>
+struct base_socket::address<base_socket::domain::ipv6> {
+    using type = ::sockaddr_in6;
+    ::psa::result<type, int> from_string(const std::string & src, unsigned port) {
+        type addr;
+        ::memset(&addr, 0, sizeof(type));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(port);
+        return ::inet_pton(AF_INET6, src.c_str(), &addr.sin6_addr) == 1 ? ::psa::result<type, int>::ok(addr)
+                                                                        : ::psa::result<type, int>::err(EINVAL);
+    }
+};
+
+//! socket
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline socket<_Sched>::socket(typename _Sched::handle_type && handle) noexcept : handle_(std::move(handle)) {
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<socket<_Sched>> socket<_Sched>::make(
+    _Sched & scheduler, int fd) noexcept {
+    int on = 1;
+    int err = ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    if (err != 0) {
+        ::close(fd);
+        return result<socket>::err(errno);
+    }
+    auto handle = scheduler.register_file_descriptor(fd);
+    return handle.is_ok() ? result<socket>::ok(std::move(handle.take_ok())) : result<socket>::err(handle.err());
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<socket<_Sched>> socket<_Sched>::make(
+    _Sched & sched, domain domain, type type) noexcept {
+    int fd = ::socket(static_cast<int>(domain), static_cast<int>(type), 0);
+    if (fd < 0)
+        return result<socket>::err(errno);
+    return make(sched, fd);
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline socket<_Sched>::~socket() {
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<> socket<_Sched>::connect(
+    ::sockaddr * addr, socklen_t addr_len) noexcept {
+    return handle_.await(_Sched::event_type::read, [this, addr, addr_len] {
+        int err = ::connect(handle_.fd(), addr, addr_len);
+        if (err == 0 or errno == EISCONN) {
+            return socket::result<>::sync_type::ok<>();
+        }
+        return socket::result<>::sync_type::err(errno == EINPROGRESS ? EAGAIN : errno);
+    });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<> socket<_Sched>::bind(::sockaddr * addr, socklen_t addr_len) noexcept {
+    int err = ::bind(handle_.fd(), addr, addr_len);
+    return err == 0 ? result<>::ok<>() : result<>::err(errno);
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<> socket<_Sched>::listen(int backlog) noexcept {
+    int err = ::listen(handle_.fd(), backlog);
+    return err == 0 ? result<>::ok<>() : result<>::err(errno);
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<typename _Other>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Other>
+#endif
+inline typename socket<_Sched>::template result<socket<_Other>> socket<_Sched>::accept(
+    _Other & scheduler, ::sockaddr * addr, socklen_t * addr_len) noexcept {
+    return handle_.await(_Sched::event_type::read, [this, &scheduler, addr, addr_len] {
+        int ret_fd = ::accept(handle_.fd(), addr, addr_len);
+        if (ret_fd >= 0) {
+            auto client = socket<_Other>::make(scheduler, ret_fd).sync();
+            return client.is_ok() ? result<socket<_Other>>::sync_type::ok(client.take_ok())
+                                  : result<socket<_Other>>::sync_type::err(client.take_err());
+        }
+        return result<socket<_Other>>::sync_type::err(errno == EWOULDBLOCK ? EAGAIN : errno);
+    });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<base_socket::domain _Domain>
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::receive_message(
+    void * buffer, size_t size, typename socket::address<_Domain>::type & address) noexcept {
+    using address_type = typename socket::address<_Domain>::type;
+    struct reader {
+        int fd;
+        void * buffer;
+        size_t size;
+        address_type & address;
+
+        inline auto operator()() noexcept {
+            socklen_t address_len = sizeof(address_type);
+            ssize_t ret = ::recvfrom(fd, buffer, size, 0, reinterpret_cast<::sockaddr *>(&address), &address_len);
+            if (ret >= 0) {
+                return result<size_t>::sync_type::ok(ret);
+            }
+            return result<size_t>::sync_type::err(errno == EWOULDBLOCK or ret > 0 ? EAGAIN : errno);
+        }
+    };
+
+    return handle_.await(_Sched::event_type::read, reader { handle_.fd(), buffer, size, address });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<base_socket::domain _Domain>
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::send_message(
+    const void * buffer, size_t size, const typename socket::address<_Domain>::type & address) noexcept {
+    using address_type = typename socket::address<_Domain>::type;
+    struct writer {
+        int fd;
+        const void * buffer;
+        size_t size;
+        const address_type & address;
+
+        inline auto operator()() noexcept {
+            ssize_t ret
+                = ::sendto(fd, buffer, size, 0, reinterpret_cast<const ::sockaddr *>(&address), sizeof(address_type));
+            if (ret >= 0) {
+                return result<size_t>::sync_type::ok(ret);
+            }
+
+            return result<size_t>::sync_type::err(errno == EWOULDBLOCK or ret > 0 ? EAGAIN : errno);
+        }
+    };
+
+    return handle_.await(_Sched::event_type::write, writer { handle_.fd(), buffer, size, address });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::read(void * buffer, size_t size) noexcept {
+    struct reader {
+        int fd;
+        void * buffer;
+        size_t size;
+        size_t bytes_read;
+
+        inline auto operator()() noexcept {
+            ssize_t ret = ::read(
+                fd, reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(buffer) + bytes_read), size - bytes_read);
+            if (ret > 0) {
+                bytes_read += ret;
+            }
+            if (bytes_read == size or ret == 0) {
+                return result<size_t>::sync_type::ok(bytes_read);
+            }
+            return result<size_t>::sync_type::err(errno == EWOULDBLOCK or ret > 0 ? EAGAIN : errno);
+        }
+    };
+
+    return handle_.await(_Sched::event_type::read, reader { handle_.fd(), buffer, size, 0 });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<typename _Tp>
+inline typename socket<_Sched>::template result<> socket<_Sched>::read(_Tp & ret) noexcept {
+    return read(&ret, sizeof(_Tp)).and_then([](auto bytes) {
+        return bytes != sizeof(_Tp) ? result<>::sync_type::err(bytes == 0 ? ENODATA : EIO)
+                                    : result<>::sync_type::ok<>();
+    });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::write(
+    const void * buffer, size_t size) noexcept {
+    struct writer {
+        int fd;
+        const void * buffer;
+        size_t size;
+        size_t bytes_written;
+
+        inline auto operator()() noexcept {
+            ssize_t ret
+                = ::write(fd, reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(buffer) + bytes_written),
+                    size - bytes_written);
+            if (ret > 0) {
+                bytes_written += ret;
+            }
+            if (bytes_written == size or ret == 0) {
+                return result<size_t>::sync_type::ok(bytes_written);
+            }
+
+            return result<size_t>::sync_type::err(errno == EWOULDBLOCK or ret > 0 ? EAGAIN : errno);
+        }
+    };
+
+    return handle_.await(_Sched::event_type::write, writer { handle_.fd(), buffer, size, 0 });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<typename _Tp>
+inline typename socket<_Sched>::template result<> socket<_Sched>::write(const _Tp & value) noexcept {
+    return write(&value, sizeof(_Tp)).and_then([](auto bytes) {
+        return bytes != sizeof(_Tp) ? result<>::sync_type::err(EIO) : result<>::sync_type::ok<>();
+    });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<socklen_t> socket<_Sched>::name(
+    ::sockaddr * addr, socklen_t len) noexcept {
+    int ret = ::getsockname(handle_.fd(), addr, &len);
+    return ret == 0 ? result<socklen_t>::ok(len) : result<socklen_t>::err(errno);
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<size_t _N>
+inline typename socket<_Sched>::template result<std::tuple<size_t, size_t>> socket<_Sched>::receive_file_descriptors(
+    int * fd_array, void * buffer, size_t size) noexcept {
+    static_assert(_N > 0, "receive_file_descriptors requires non-empty descriptor storage");
+    using result_type = result<std::tuple<size_t, size_t>>;
+    struct reader {
+        int fd;
+        int * right;
+        void * buffer;
+        size_t size;
+
+        inline auto operator()() noexcept {
+            static constexpr size_t control_buffer_size = CMSG_SPACE(_N * sizeof(int));
+            struct ::msghdr msg {};
+            struct ::iovec iov;
+            alignas(::cmsghdr) std::array<unsigned char, control_buffer_size> ctrl_data {};
+            for (size_t i = 0; i < _N; ++i)
+                right[i] = -1;
+
+            iov.iov_base = buffer;
+            iov.iov_len = size;
+
+            msg.msg_name = nullptr;
+            msg.msg_namelen = 0;
+            msg.msg_iov = &iov;
+            msg.msg_iovlen = 1;
+            msg.msg_controllen = sizeof(ctrl_data);
+            msg.msg_control = ctrl_data.data();
+
+            ssize_t ret = ::recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
+
+            if (ret >= 0) {
+                // The control buffer can hold more descriptors than the destination array
+                // because CMSG_SPACE includes alignment padding. Cleanup must therefore be
+                // bounded by safely readable SCM_RIGHTS payload, never by _N.
+                struct descriptor_guard {
+                    std::array<int, control_buffer_size / sizeof(int)> descriptors {};
+                    size_t count = 0;
+
+                    ~descriptor_guard() {
+                        for (size_t i = 0; i < count; ++i)
+                            ::close(descriptors[i]);
+                    }
+
+                    bool add(int descriptor) noexcept {
+                        if (count == descriptors.size()) {
+                            ::close(descriptor);
+                            return false;
+                        }
+                        descriptors[count++] = descriptor;
+                        return true;
+                    }
+
+                    void release() noexcept { count = 0; }
+                } received;
+
+                int parse_error = (msg.msg_flags & MSG_CTRUNC) != 0 ? EMSGSIZE : 0;
+                size_t control_count = 0;
+                size_t rights_count = 0;
+                const auto base_len = CMSG_LEN(0);
+                auto * cmsg = CMSG_FIRSTHDR(&msg);
+
+                if (msg.msg_controllen != 0 and cmsg == nullptr and parse_error == 0)
+                    parse_error = ECOMM;
+
+                // recvmsg returns kernel-constructed ancillary headers, so these bounds failures are defensive. Once a
+                // header length is invalid there is no trustworthy next-header offset; stop instead of advancing through
+                // arbitrary memory. The kernel cannot place a later installed descriptor behind such a malformed header.
+                while (cmsg != nullptr) {
+                    ++control_count;
+                    auto * cmsg_data = reinterpret_cast<unsigned char *>(cmsg);
+                    auto offset = static_cast<size_t>(cmsg_data - ctrl_data.data());
+                    if (offset > msg.msg_controllen) {
+                        if (parse_error == 0)
+                            parse_error = ECOMM;
+                        break;
+                    }
+
+                    auto available = msg.msg_controllen - offset;
+                    if (available < base_len or cmsg->cmsg_len < base_len) {
+                        if (parse_error == 0)
+                            parse_error = ECOMM;
+                        break;
+                    }
+
+                    auto declared_payload = cmsg->cmsg_len - base_len;
+                    auto readable_payload = std::min(declared_payload, available - base_len);
+                    bool is_rights = cmsg->cmsg_level == SOL_SOCKET and cmsg->cmsg_type == SCM_RIGHTS;
+                    if (is_rights) {
+                        ++rights_count;
+                        auto readable_count = readable_payload / sizeof(int);
+                        for (size_t i = 0; i < readable_count; ++i) {
+                            int descriptor;
+                            ::memcpy(&descriptor, CMSG_DATA(cmsg) + i * sizeof(int), sizeof(descriptor));
+                            if (!received.add(descriptor) and parse_error == 0)
+                                parse_error = ECOMM;
+                        }
+                        if (declared_payload % sizeof(int) != 0 and parse_error == 0)
+                            parse_error = ECOMM;
+                    } else if (parse_error == 0) {
+                        parse_error = ECOMM;
+                    }
+
+                    if (cmsg->cmsg_len > available) {
+                        if (parse_error == 0)
+                            parse_error = ECOMM;
+                        break;
+                    }
+                    cmsg = CMSG_NXTHDR(&msg, cmsg);
+                }
+
+                if ((control_count != 0 and (control_count != rights_count or rights_count != 1))
+                    or received.count > _N) {
+                    if (parse_error == 0)
+                        parse_error = ECOMM;
+                }
+                if (parse_error != 0)
+                    return result_type::sync_type::err(parse_error);
+
+                auto received_count = received.count;
+                ::memcpy(right, received.descriptors.data(), received_count * sizeof(int));
+                received.release();
+                return result_type::sync_type::ok(std::make_tuple(ret, received_count));
+            }
+            return result_type::sync_type::err(errno == EWOULDBLOCK or ret > 0 ? EAGAIN : errno);
+        }
+    };
+
+    return handle_.await(_Sched::event_type::read, reader { handle_.fd(), fd_array, buffer, size });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<size_t _N>
+inline typename socket<_Sched>::template result<std::tuple<size_t, size_t>>
+socket<_Sched>::receive_file_descriptor_array(std::array<int, _N> & fd_array, void * buffer, size_t size) noexcept {
+    static_assert(_N > 0, "receive_file_descriptor_array requires non-empty descriptor storage");
+    return receive_file_descriptors<_N>(fd_array.data(), buffer, size);
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<size_t _N, typename _Tp>
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::receive_file_descriptor_array(
+    std::array<int, _N> & fd_array, _Tp & value) noexcept {
+    return receive_file_descriptor_array(fd_array, &value, sizeof(_Tp)).and_then([&fd_array](auto bytes) {
+        if (std::get<0>(bytes) != sizeof(_Tp)) {
+            for (size_t i = 0; i < std::get<1>(bytes); ++i) {
+                ::close(fd_array[i]);
+                fd_array[i] = -1;
+            }
+            return result<size_t>::sync_type::err(EIO);
+        }
+        return result<size_t>::sync_type::ok(std::get<1>(bytes));
+    });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<std::tuple<size_t, size_t>> socket<_Sched>::receive_file_descriptor(
+    int & fd, void * buffer, size_t size) noexcept {
+    return receive_file_descriptors<1>(&fd, buffer, size);
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<typename _Tp>
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::receive_file_descriptor(
+    int & fd, _Tp & value) noexcept {
+    return receive_file_descriptor(fd, &value, sizeof(_Tp)).and_then([&fd](auto bytes) {
+        if (std::get<0>(bytes) != sizeof(_Tp)) {
+            if (std::get<1>(bytes) != 0) {
+                ::close(fd);
+                fd = -1;
+            }
+            return result<size_t>::sync_type::err(EIO);
+        }
+        return result<size_t>::sync_type::ok(std::get<1>(bytes));
+    });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<size_t _N>
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::send_file_descriptor_array(
+    const std::array<int, _N> & fd_array, const void * buffer, size_t size) noexcept {
+    static_assert(_N > 0, "send_file_descriptor_array requires at least one descriptor");
+    struct writer {
+        int fd;
+        std::array<int, _N> right;
+        const void * buffer;
+        size_t size;
+
+        inline auto operator()() noexcept {
+            struct ::msghdr msg {};
+            struct ::cmsghdr * cmsg;
+            struct ::iovec iov;
+            char ctrl_data[CMSG_SPACE(_N * sizeof(int))];
+            ::memset(ctrl_data, 0, sizeof(ctrl_data));
+
+            iov.iov_base = const_cast<void *>(buffer);
+            iov.iov_len = size;
+
+            msg.msg_name = nullptr;
+            msg.msg_namelen = 0;
+            msg.msg_iov = &iov;
+            msg.msg_iovlen = 1;
+            msg.msg_controllen = CMSG_LEN(_N * sizeof(int));
+            msg.msg_control = ctrl_data;
+            msg.msg_flags = 0;
+
+            cmsg = CMSG_FIRSTHDR(&msg);
+            cmsg->cmsg_level = SOL_SOCKET;
+            cmsg->cmsg_type = SCM_RIGHTS;
+            cmsg->cmsg_len = CMSG_LEN(_N * sizeof(int));
+            ::memcpy((reinterpret_cast<int *>(CMSG_DATA(cmsg))), right.data(), _N * sizeof(int));
+
+            ssize_t ret = ::sendmsg(fd, &msg, 0);
+            if (ret == static_cast<ssize_t>(size) or ret == 0) {
+                return result<size_t>::sync_type::ok(ret);
+            }
+
+            return result<size_t>::sync_type::err(errno);
+        }
+    };
+
+    return handle_.await(_Sched::event_type::write, writer { handle_.fd(), fd_array, buffer, size });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<size_t _N, typename _Tp>
+inline typename socket<_Sched>::template result<> socket<_Sched>::send_file_descriptor_array(
+    const std::array<int, _N> & fd_array, const _Tp & value) noexcept {
+    return send_file_descriptor_array(fd_array, &value, sizeof(_Tp)).and_then([](auto bytes) {
+        return bytes != sizeof(_Tp) ? result<>::sync_type::err(-EIO) : result<>::sync_type::ok<>();
+    });
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+inline typename socket<_Sched>::template result<size_t> socket<_Sched>::send_file_descriptor(
+    int fd, const void * buffer, size_t size) noexcept {
+    return send_file_descriptor_array(std::array<int, 1> { fd }, buffer, size);
+}
+
+template<typename _Sched>
+#if defined(__cpp_concepts)
+    requires Scheduler<_Sched>
+#endif
+template<typename _Tp>
+inline typename socket<_Sched>::template result<> socket<_Sched>::send_file_descriptor(
+    int fd, const _Tp & value) noexcept {
+    return send_file_descriptor(fd, &value, sizeof(_Tp)).and_then([](auto bytes) {
+        return bytes != sizeof(_Tp) ? result<>::sync_type::err(-EIO) : result<>::sync_type::ok<>();
+    });
+}
+
+}}
+
+#endif

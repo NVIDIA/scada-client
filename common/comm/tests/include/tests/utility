@@ -1,0 +1,287 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef TESTS_UTILITY
+#define TESTS_UTILITY
+
+#include <gtest/gtest.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <psa/coaio/detached>
+#include <psa/coaio/scheduler/epoll>
+#include <psa/coaio/socket>
+
+#include <iostream>
+
+#if defined(__CUDACC__)
+namespace tests {
+
+class CUDATest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        int gpu_count = 0;
+        if (cudaGetDeviceCount(&gpu_count) != cudaSuccess or gpu_count <= 0) {
+            GTEST_SKIP() << "No CUDA capable GPUs present. Skipping GPU tests";
+        }
+    }
+};
+
+}
+#endif
+
+namespace tests {
+
+struct process_handle {
+    pid_t pid_;
+
+    inline process_handle(pid_t pid) noexcept : pid_(pid) {}
+
+    process_handle(const process_handle &) = delete;
+
+    inline process_handle(process_handle && other) noexcept : pid_(other.pid_) { other.pid_ = -1; }
+
+    inline ~process_handle() noexcept {
+        if (pid_ < 0)
+            return;
+
+        ::kill(pid_, SIGTERM);
+    }
+
+    inline bool wait() const noexcept {
+        int status = 0;
+        int err = ::waitpid(pid_, &status, 0);
+        if (err != pid_)
+            return false;
+        return WEXITSTATUS(status) == EXIT_SUCCESS;
+    }
+};
+
+template<typename _Fn>
+static inline process_handle process(_Fn && fn) {
+    pid_t pid = fork();
+    if (pid != 0)
+        return process_handle(pid);
+
+    fn();
+    if (::testing::Test::HasFatalFailure()) {
+        ::exit(EXIT_FAILURE);
+    }
+    ::exit(EXIT_SUCCESS);
+}
+
+namespace io {
+using scheduler = ::psa::coaio::scheduler::epoll;
+using socket = ::psa::coaio::socket<scheduler>;
+using detached = ::psa::coaio::detached;
+
+template<typename _Tp = ::psa::coaio::none_type>
+using result = psa::futures::result<_Tp, int>;
+}
+
+#if defined(__psa_use_coroutines)
+
+struct server {
+    io::socket socket_;
+    std::optional<::sockaddr_un> address_;
+
+    inline server(io::socket && socket, ::sockaddr_un && address) noexcept
+        : socket_(std::move(socket)),
+          address_(std::move(address)) {}
+    inline server(server && other) noexcept : socket_(std::move(other.socket_)), address_(std::move(other.address_)) {
+        other.address_ = std::nullopt;
+    }
+
+    inline ~server() noexcept {
+        if (address_.has_value()) {
+            ::unlink(address_.value().sun_path);
+        }
+    }
+
+    inline io::result<io::socket> accept(io::scheduler & sched) noexcept {
+        return socket_.accept(sched, nullptr, nullptr);
+    }
+
+    static inline io::result<server> make(
+        io::scheduler & sched, const std::string & name, unsigned backlog = 32) noexcept {
+        auto sock = co_await io::socket::make(sched, io::socket::domain::local, io::socket::type::stream);
+        EXPECT_TRUE(sock.is_ok());
+        if (sock.is_err())
+            co_return io::result<server>::sync_type::err(sock.err());
+
+        auto addr = io::socket::address<io::socket::domain::local>::from_string(name);
+        EXPECT_TRUE(addr.is_ok());
+        if (addr.is_err())
+            co_return io::result<server>::sync_type::err(addr.err());
+        int err = ::unlink(addr.ok().sun_path);
+        EXPECT_TRUE(err == 0 or errno == ENOENT);
+        if (err < 0 and errno != ENOENT)
+            co_return io::result<server>::sync_type::err(errno);
+        auto sock_addr = addr.ok();
+        auto res = co_await sock.ok()
+                       .bind(reinterpret_cast<::sockaddr *>(&sock_addr), sizeof(sock_addr))
+                       .and_then([&](auto) { return sock.ok().listen(backlog); })
+                       .or_else([&](auto err) {
+                           ::unlink(sock_addr.sun_path);
+                           return io::result<>::sync_type::err(err);
+                       });
+        EXPECT_TRUE(res.is_ok());
+        if (res.is_err())
+            co_return io::result<server>::sync_type::err(res.err());
+
+        co_return io::result<server>::sync_type::ok(sock.take_ok(), addr.take_ok());
+    }
+};
+
+struct client {
+    io::socket socket_;
+
+    inline client(io::socket && socket) noexcept : socket_(std::move(socket)) {}
+    client(client &&) noexcept = default;
+
+    static inline io::result<client> connect(io::scheduler & sched, const std::string & name) noexcept {
+        auto sock = co_await io::socket::make(sched, io::socket::domain::local, io::socket::type::stream);
+        EXPECT_TRUE(sock.is_ok());
+        if (sock.is_err())
+            co_return io::result<client>::sync_type::err(sock.err());
+
+        auto addr = io::socket::address<io::socket::domain::local>::from_string(name);
+        EXPECT_TRUE(addr.is_ok());
+        if (addr.is_err())
+            co_return io::result<client>::sync_type::err(addr.err());
+        auto sock_addr = addr.ok();
+        auto res = co_await sock.ok()
+                       .connect(reinterpret_cast<::sockaddr *>(&sock_addr), sizeof(sock_addr))
+                       .and_then([&](auto) { return io::result<client>::sync_type::ok(sock.take_ok()); });
+        EXPECT_TRUE(res.is_ok()) << "error = " << res.err();
+        co_return res;
+    }
+};
+
+#else
+
+struct server {
+    io::socket socket_;
+    std::optional<::sockaddr_un> address_;
+
+    inline server(io::socket && socket, ::sockaddr_un && address) noexcept
+        : socket_(std::move(socket)),
+          address_(std::move(address)) {}
+    inline server(server && other) noexcept : socket_(std::move(other.socket_)), address_(std::move(other.address_)) {
+        other.address_ = std::nullopt;
+    }
+
+    inline ~server() noexcept {
+        if (address_.has_value()) {
+            ::unlink(address_.value().sun_path);
+        }
+    }
+
+    inline io::result<io::socket> accept(io::scheduler & sched) noexcept {
+        return socket_.accept(sched, nullptr, nullptr);
+    }
+
+    static inline io::result<server> make(
+        io::scheduler & sched, const std::string & name, unsigned backlog = 32) noexcept {
+        auto sock = io::socket::make(sched, io::socket::domain::local, io::socket::type::stream).sync();
+        EXPECT_TRUE(sock.is_ok());
+        if (sock.is_err())
+            return io::result<server>::err(sock.err());
+
+        auto addr = io::socket::address<io::socket::domain::local>::from_string(name);
+        EXPECT_TRUE(addr.is_ok());
+        if (addr.is_err())
+            return io::result<server>::err(addr.err());
+        int err = ::unlink(addr.ok().sun_path);
+        EXPECT_TRUE(err == 0 or errno == ENOENT);
+        if (err < 0 and errno != ENOENT)
+            return io::result<server>::sync_type::err(errno);
+        auto sock_addr = addr.ok();
+        auto res = sock.ok()
+                       .bind(reinterpret_cast<::sockaddr *>(&sock_addr), sizeof(sock_addr))
+                       .and_then([&](auto) { return sock.ok().listen(backlog); })
+                       .or_else([&](auto err) {
+                           ::unlink(sock_addr.sun_path);
+                           return io::result<>::sync_type::err(err);
+                       })
+                       .sync();
+        EXPECT_TRUE(res.is_ok());
+        if (res.is_err())
+            return io::result<server>::err(res.err());
+
+        return io::result<server>::ok(sock.take_ok(), addr.take_ok());
+    }
+};
+
+struct client {
+    io::socket socket_;
+
+    inline client(io::socket && socket) noexcept : socket_(std::move(socket)) {}
+    client(client &&) noexcept = default;
+
+    static inline io::result<client> connect(io::scheduler & sched, const std::string & name) noexcept {
+        auto sock = io::socket::make(sched, io::socket::domain::local, io::socket::type::stream).sync();
+        EXPECT_TRUE(sock.is_ok());
+        if (sock.is_err())
+            return io::result<client>::sync_type::err(sock.err());
+
+        auto addr = io::socket::address<io::socket::domain::local>::from_string(name);
+        EXPECT_TRUE(addr.is_ok());
+        if (addr.is_err())
+            return io::result<client>::sync_type::err(addr.err());
+        auto sock_addr = addr.ok();
+        auto res = sock.ok()
+                       .connect(reinterpret_cast<::sockaddr *>(&sock_addr), sizeof(sock_addr))
+                       .and_then([&](auto) { return io::result<client>::sync_type::ok(sock.take_ok()); })
+                       .sync();
+        EXPECT_TRUE(res.is_ok()) << "error = " << res.err();
+        return res.is_ok() ? io::result<client>::ok(res.take_ok()) : io::result<client>::err(res.err());
+    }
+};
+
+#endif
+
+class ipc_barrier {
+protected:
+    std::shared_ptr<pthread_barrier_t> posix_;
+
+    inline ipc_barrier(std::shared_ptr<pthread_barrier_t> && bar) noexcept : posix_(std::move(bar)) {}
+
+public:
+    inline ipc_barrier(ipc_barrier &&) noexcept = default;
+
+    inline void arrive_and_wait() const noexcept { pthread_barrier_wait(posix_.get()); }
+
+    static inline psa::result<ipc_barrier, int> make(unsigned count) noexcept {
+        using result_type = psa::result<ipc_barrier, int>;
+        pthread_barrierattr_t attr;
+
+        int err = pthread_barrierattr_init(&attr);
+        if (err != 0)
+            return result_type::err(err);
+        err = pthread_barrierattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+        if (err != 0)
+            return result_type::err(err);
+
+        pthread_barrier_t * barrier = reinterpret_cast<pthread_barrier_t *>(
+            ::mmap(0, sizeof(pthread_barrier_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+        if (barrier == reinterpret_cast<pthread_barrier_t *>(MAP_FAILED))
+            return result_type::err(errno);
+
+        if (pthread_barrier_init(barrier, &attr, count) != 0) {
+            ::munmap(barrier, sizeof(pthread_barrier_t));
+            return result_type::err(errno);
+        }
+
+        return result_type::ok(ipc_barrier(std::shared_ptr<pthread_barrier_t>(
+            barrier, [](pthread_barrier_t * bar) { ::munmap(bar, sizeof(pthread_barrier_t)); })));
+    }
+};
+
+}
+
+#endif

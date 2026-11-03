@@ -1,0 +1,264 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_IMPL_AUTOBATCH
+#define GDAKIS_IPC_IMPL_AUTOBATCH
+
+#if defined(__NVCC__)
+#  include <gdakis/umem/cuda>
+#endif
+#include <gdakis/__comm_log>
+namespace gdakis::comm::ipc {
+
+template<typename _Entry, device_type _Device>
+inline __host__ __device__ work_buffer<_Entry, _Device>::work_buffer(
+    unsigned size, _Entry * entries, request_buffer_control_type * control) noexcept
+    : size_(size),
+      data_(entries),
+      control_(control),
+      index_(0),
+      none_({}) {}
+
+template<typename _Entry, device_type _Device>
+inline __host__ __device__ void work_buffer<_Entry, _Device>::acquire() noexcept {
+    if (index_ == 1) {
+#pragma nv_diag_suppress 20011
+        control_->ready_.wait(std::move(token_));
+        index_ = 0;
+    }
+}
+
+template<typename _Entry, device_type _Device>
+inline __host__ __device__ void work_buffer<_Entry, _Device>::enable() noexcept {
+#pragma nv_diag_suppress 20011
+    token_ = control_->ready_.arrive();
+    index_ = 1;
+}
+
+template<typename _Entry, device_type _Device>
+inline __host__ __device__ void work_buffer<_Entry, _Device>::commit(unsigned pos) noexcept {
+    control_->count_ = pos;
+#pragma nv_diag_suppress 20011
+    control_->ready_.arrive_and_wait();
+#pragma nv_diag_suppress 20011
+    enable();
+}
+
+template<typename _Entry, device_type _Device>
+inline __host__ __device__ unsigned work_buffer<_Entry, _Device>::size() const noexcept {
+    return size_;
+}
+
+template<typename _Entry, device_type _Device>
+template<typename _Fn>
+inline __host__ __device__ void work_buffer<_Entry, _Device>::set(unsigned pos, _Fn && fn) noexcept {
+    fn(data_[pos]);
+}
+
+namespace {
+
+template<typename _Allocator, thread_scope _Sco, size_t _NumBuffers, typename _Entry, typename _Control>
+static inline umem::ptr_type<autobatch<_Allocator, _Entry, _Sco, _NumBuffers>> __build_autobatch(
+    unsigned size, _Entry * entries, _Control * control) noexcept {
+    return umem::mem<_Allocator, autobatch<_Allocator, _Entry, _Sco, _NumBuffers>>::alloc([size, entries, control]
+        __host__ __device__(std::size_t i) { return work_buffer(size, entries + (i * size), control + i); });
+}
+
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+inline autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::handle(
+    size_t buffer_size, entry_ptr && entries, control_ptr && control, umem::ptr_type<autobatch> && autobatch) noexcept
+    : buffer_size_(buffer_size),
+      entries_(std::move(entries)),
+      control_(std::move(control)),
+      autobatch_(std::move(autobatch)) {}
+
+namespace {
+
+template<typename _Allocator>
+struct __request_buffer_control_type;
+
+template<>
+struct __request_buffer_control_type<umem::cpu> {
+    static inline ptr<umem::cpu, request_buffer_control<device_type::cpu>> alloc(std::size_t size) noexcept {
+        using request_buffer_control_type = request_buffer_control<device_type::cpu>;
+        return shmem<umem::cpu, request_buffer_control_type[]>::alloc(
+            size, [](size_t, request_buffer_control_type * ctrl) { ctrl = new (ctrl) request_buffer_control_type(); });
+    }
+
+    template<typename... Args>
+    static inline void cancel(Args &&...) noexcept {};
+};
+
+#if defined(__CUDACC__)
+template<>
+struct __request_buffer_control_type<umem::cuda> {
+    static inline ptr<umem::cuda, request_buffer_control<device_type::cuda>> alloc(std::size_t size) noexcept {
+        using request_buffer_control_type = request_buffer_control<device_type::cuda>;
+        return shmem<umem::cuda, request_buffer_control_type[]>::alloc(
+            size, [] __host__ __device__(size_t, request_buffer_control_type * ctrl) {
+                ctrl = new (ctrl) request_buffer_control_type();
+            });
+    }
+
+    static inline void cancel(request_buffer_control<device_type::cuda> * ctrl) noexcept {
+        ctrl->ready_.cancel<gdakis::umem::cuda>();
+    }
+};
+#endif
+
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+inline autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::~handle() noexcept {
+    if (control_.get() != nullptr) {
+        constexpr unsigned num_buffers = _NumBuffers;
+        for (unsigned n = 0; n < num_buffers; ++n) {
+            __request_buffer_control_type<_Allocator>::cancel(control_.get() + n);
+        }
+    }
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+inline typename autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::result_type
+autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::build(size_t buffer_size) noexcept {
+    auto entries
+        = shmem<_Allocator, _Entry[]>::alloc(buffer_size * _NumBuffers, [] __host__ __device__(size_t, _Entry *) {});
+    if (entries == nullptr) {
+        COMM_LOG("Autobatch entries alloc failed with ENOMEM");
+        return result_type::err(ENOMEM);
+    }
+
+    auto control = __request_buffer_control_type<_Allocator>::alloc(_NumBuffers);
+    /*
+    auto control = shmem<_Allocator, request_buffer_control_type[]>::alloc(_NumBuffers,
+        [] __host__ __device__ (size_t, request_buffer_control_type * ctrl) {
+            ctrl = new(ctrl) request_buffer_control_type();
+        }
+    );*/
+    if (control == nullptr) {
+        COMM_LOG("Autobatch control alloc failed with ENOMEM");
+        return result_type::err(ENOMEM);
+    }
+
+    auto autobatch = __build_autobatch<_Allocator, _Sco, _NumBuffers>(buffer_size, entries.get(), control.get());
+    if (autobatch == nullptr) {
+        COMM_LOG("Autobatch object creation failed with ENOMEM");
+        return result_type::err(ENOMEM);
+    }
+
+    return result_type::ok(buffer_size, std::move(entries), std::move(control), std::move(autobatch));
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+inline typename autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::result_type
+autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::import(unsigned buffer_size,
+    typename control_ptr::handle_type && control_handle, const typename control_ptr::ancillary_type & control_ancillary,
+    typename entry_ptr::handle_type && entry_handle,
+    const typename entry_ptr::ancillary_type & entry_ancillary) noexcept {
+    auto control = shmem<_Allocator, request_buffer_control_type[]>::import(
+        std::move(control_handle), control_ancillary, buffer_size);
+    if (control == nullptr) {
+        return result_type::err(ENOMEM);
+    }
+
+    auto entries = shmem<_Allocator, _Entry[]>::import(std::move(entry_handle), entry_ancillary, buffer_size);
+    if (entries == nullptr) {
+        return result_type::err(ENOMEM);
+    }
+
+    auto autobatch = __build_autobatch<_Allocator, _Sco, _NumBuffers>(buffer_size, entries.get(), control.get());
+    if (autobatch == nullptr) {
+        return result_type::err(ENOMEM);
+    }
+
+    return result_type::ok(buffer_size, std::move(entries), std::move(control), std::move(autobatch));
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+inline psa::result<typename autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::request_type, int>
+autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::request() const noexcept {
+    using return_type = psa::result<request_type, int>;
+
+    request_type ret;
+    ret.data().req.num_buffers = _NumBuffers;
+    ret.data().req.entry_size = sizeof(_Entry);
+    ret.data().req.buffer_size = buffer_size_;
+
+    auto control_handle = control_.handle();
+    if (control_handle.is_err()) {
+        COMM_LOG(LOCSTR, "autobatch registration request failed with the control handle in error");
+        return return_type::err(control_handle.err());
+    }
+
+    ret.data().backend.control = control_handle.ok();
+
+    auto buffer_handle = entries_.handle();
+    if (buffer_handle.is_err()) {
+        COMM_LOG(LOCSTR, "autobatch registration request failed with the entries handle in error");
+        return return_type::err(buffer_handle.err());
+    }
+
+    ret.data().backend.buffer = buffer_handle.ok();
+
+    ret.ancillary().set(control_.ancillary(), entries_.ancillary());
+
+    return return_type::ok(ret);
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+template<typename _Socket>
+inline auto autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::send_to_server(
+    _Socket & socket) noexcept {
+    auto msg = request();
+    using result_type = decltype(ipc::send_to_server(socket, msg.ok()).sync());
+    if (msg.is_err()) {
+        COMM_LOG(LOCSTR, "autobatch creation request message in error state");
+        return result_type::err(msg.err());
+    }
+
+    auto res = ipc::send_to_server(socket, msg.ok()).sync();
+    if (res.is_err()) {
+        COMM_LOG(LOCSTR, "autobatch request submission in error state");
+        return res;
+    }
+
+    response_type ack;
+    res = socket.read(ack).sync();
+    if (res.is_err()) {
+        COMM_LOG(LOCSTR, "autobatch register_request_buffers response message in error state");
+        return res;
+    }
+
+    if (ack.status == status_type::ok) {
+        id_ = ack.id;
+    } else {
+        COMM_LOG(LOCSTR, "autobatch register_request_buffers received non-ok status from server");
+    }
+
+    return ack.status == status_type::ok ? result_type::template ok<>()
+                                         : result_type::err(static_cast<int>(ack.status));
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+inline autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device> *
+autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::get() const noexcept {
+    return autobatch_.get();
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+const std::optional<unsigned> & autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::handle::id() const noexcept {
+    return id_;
+}
+
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers, device_type _Device>
+template<typename... Args>
+__host__
+__device__ inline autobatch<_Allocator, _Entry, _Sco, _NumBuffers, _Device>::autobatch(Args &&... args) noexcept
+    : gdakis::comm::autobatch<work_buffer<_Entry, _Device>, _Sco, _NumBuffers>(std::forward<Args>(args)...) {}
+
+}
+
+#endif

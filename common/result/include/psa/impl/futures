@@ -1,0 +1,400 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_FUTURES_IMPL_RESULT
+#define PSA_FUTURES_IMPL_RESULT
+
+#include <cassert>
+#include <functional>
+#include <tuple>
+#include <type_traits>
+
+namespace psa { namespace futures {
+
+// result<_Ok, _Err>
+
+template<typename _Ok, typename _Err>
+inline result<_Ok, _Err>::result(result_type && value) noexcept : result_(std::move(value)) {}
+
+template<typename _Ok, typename _Err>
+inline result<_Ok, _Err>::result(sync_type && value) noexcept : result_(std::move(value)) {}
+
+template<typename _Ok, typename _Err>
+inline result<_Ok, _Err>::result(result && other) noexcept : result(std::move(other.result_)) {}
+
+template<typename _Ok, typename _Err>
+inline result<_Ok, _Err>::~result() {}
+
+template<typename _Ok, typename _Err>
+template<typename _Tp, typename>
+inline result<_Ok, _Err> result<_Ok, _Err>::ok(_Tp && value) noexcept {
+    return result(sync_type::ok(std::forward<_Tp>(value)));
+}
+
+template<typename _Ok, typename _Err>
+template<typename... Args>
+inline result<_Ok, _Err> result<_Ok, _Err>::ok(Args &&... args) noexcept {
+    return result::ok(_Ok(std::forward<Args>(args)...));
+}
+
+template<typename _Ok, typename _Err>
+template<typename _Tp, typename>
+inline result<_Ok, _Err> result<_Ok, _Err>::err(_Tp && value) noexcept {
+    return result(sync_type::err(std::forward<_Tp>(value)));
+}
+
+template<typename _Ok, typename _Err>
+template<typename... Args>
+inline result<_Ok, _Err> result<_Ok, _Err>::err(Args &&... args) noexcept {
+    return result::err(_Err(std::forward<Args>(args)...));
+}
+
+//! \brief Type that wraps a potentially pending futures::result
+template<typename _Ok, typename _Err>
+struct result<_Ok, _Err>::result_type : public std::variant<pending_type, sync_type> {
+    template<typename... Args>
+    inline result_type(Args &&... args) noexcept : std::variant<pending_type, sync_type>(std::forward<Args>(args)...) {}
+
+    inline bool is_ready() const noexcept {
+        return std::variant<pending_type, sync_type>::index() == 1 or std::get<0>(*this).promise().state_.index() == 1;
+    }
+
+    inline std::function<void(void)> schedule(std::coroutine_handle<> h) noexcept {
+        assert((std::variant<pending_type, sync_type>::index() == 0));
+        auto & promise = std::get<0>(*this).promise();
+        if (promise.state_.index() == 1)
+            return []() {};
+
+        promise.next_ = h;
+        assert(std::get<0>(promise.state_) != nullptr);
+        return [fn = std::get<0>(promise.state_)]() { fn(); };
+    }
+
+    inline sync_type value() noexcept {
+        if (std::variant<pending_type, sync_type>::index() == 1)
+            return std::move(std::get<1>(*this));
+        assert((std::variant<pending_type, sync_type>::index() == 0));
+        auto handle = std::get<0>(*this);
+        auto & state = handle.promise().state_;
+        auto ret = std::move(std::get<1>(state));
+        handle.destroy();
+        return ret;
+    }
+};
+
+namespace helper {
+
+template<typename _Tp, typename _Ret = std::invoke_result_t<decltype(&_Tp::value), _Tp>>
+struct return_value {
+    static inline _Ret call(_Tp & result) noexcept { return result.value(); }
+};
+
+template<typename _Tp>
+struct return_value<_Tp, void> {
+    static inline void call(_Tp &) noexcept {}
+};
+
+template<typename _Tp>
+auto call_move(_Tp & result) noexcept {
+    return return_value<_Tp>::call(result);
+}
+
+}
+
+namespace concepts {
+
+template<typename _Tp, typename _Promise>
+concept Result = requires(_Tp result, std::coroutine_handle<_Promise> h) {
+    result.value();
+    { result.is_ready() } -> std::convertible_to<bool>;
+    { result.schedule(h) } -> std::convertible_to<decltype(_Promise::state_)>;
+};
+}
+
+//! \brief Awaiter type for coroutines returning a futures::result
+template<typename _Ok, typename _Err>
+template<typename _Tp>
+struct result<_Ok, _Err>::awaiter {
+    _Tp result_; // This is the result that will wake-up the promise
+
+    inline awaiter(_Tp && res) noexcept : result_(std::forward<_Tp>(res)) {}
+
+    inline bool await_ready() noexcept { return result_.is_ready(); }
+
+    inline std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+        auto & promise = h.promise();
+        assert(promise.state_.index() == 0);
+
+        auto sched = result_.schedule(h);
+        if (sched == nullptr) {
+            return h;
+        }
+        promise.state_ = std::move(sched);
+        return std::noop_coroutine();
+    }
+
+    inline auto await_resume() { return helper::call_move(result_); }
+};
+
+//! \brief Awaiter type for calls to `co_await` on a futures::result on a coroutine returning
+//! a different type
+template<typename _Ok, typename _Err>
+struct result<_Ok, _Err>::detached {
+    result_type result_;
+
+    inline detached(result_type && result) noexcept : result_(std::move(result)) {}
+
+    inline bool await_ready() const noexcept { return result_.is_ready(); }
+
+    inline bool await_suspend(std::coroutine_handle<> h) noexcept {
+        if (result_.is_ready())
+            return false;
+        return true;
+    }
+
+    inline sync_type await_resume() noexcept {
+        assert(result_.is_ready());
+        return result_.value();
+    }
+};
+
+template<typename _Ok, typename _Err>
+class result<_Ok, _Err>::promise_type {
+protected:
+    using sched_type = std::function<void(void)>;
+    using cont_type = std::coroutine_handle<>;
+    using state_type = std::variant<sched_type, sync_type>;
+
+    state_type state_;
+    cont_type next_;
+
+    template<typename>
+    friend struct awaiter;
+    friend class result;
+
+public:
+    inline ~promise_type() noexcept {}
+
+    inline bool is_ready() const noexcept { return state_.index() == 1; }
+
+    inline std::coroutine_handle<> next() noexcept {
+        assert(state_.index() == 1);
+        auto next = std::move(next_);
+        next_ = nullptr;
+        assert(next.address() == nullptr or next.done() == false);
+        return next;
+    }
+
+    inline result get_return_object() noexcept {
+        return result { result_type {
+            std::in_place_index<0>, std::coroutine_handle<promise_type>::from_promise(*this) } };
+    }
+
+    template<typename _Tp>
+        requires concepts::Result<_Tp, promise_type>
+    inline awaiter<_Tp> await_transform(_Tp && res) noexcept {
+        return awaiter<_Tp>(std::forward<_Tp>(res));
+    }
+
+    template<typename _Op, typename _Ep>
+    inline auto await_transform(result<_Op, _Ep> & res) noexcept {
+        return awaiter<typename result<_Op, _Ep>::result_type>(std::move(res.result_));
+    }
+
+    template<typename _Op, typename _Ep>
+    inline auto await_transform(result<_Op, _Ep> && res) noexcept {
+        return awaiter<typename result<_Op, _Ep>::result_type>(std::move(res.result_));
+    }
+
+    inline std::suspend_never initial_suspend() const noexcept { return {}; }
+
+    inline auto final_suspend() const noexcept {
+        struct promise_awaiter {
+            inline bool await_ready() const noexcept { return false; }
+
+            inline std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> handle) const noexcept {
+                auto next = handle.promise().next();
+                return next ? next : std::noop_coroutine();
+            }
+
+            inline void await_resume() const noexcept {}
+        };
+        return promise_awaiter();
+    }
+
+    inline void return_value(sync_type && value) noexcept {
+        assert(state_.index() == 0);
+        state_.template emplace<1>(std::forward<sync_type>(value));
+    }
+
+    inline void unhandled_exception() const { std::terminate(); }
+
+    inline sync_type sync() noexcept {
+        while (is_ready() == false) {
+            auto sched = std::get<0>(state_);
+            assert(sched != nullptr);
+            sched();
+        }
+        assert(is_ready());
+        if (next_)
+            next_.resume();
+        assert(next_ == nullptr or next_.done());
+        return std::move(std::get<1>(state_));
+    }
+};
+
+template<typename _Ok, typename _Err>
+inline auto result<_Ok, _Err>::operator co_await() noexcept {
+    return detached(std::move(result_));
+}
+
+template<typename _Ok, typename _Err>
+inline typename result<_Ok, _Err>::sync_type result<_Ok, _Err>::sync() noexcept {
+    if (result_.index() == 0) {
+        auto handle = std::get<0>(result_);
+        result_.template emplace<1>(handle.promise().sync());
+        handle.destroy();
+    }
+    assert(result_.index() != 0);
+    return std::move(std::get<1>(result_));
+}
+
+namespace helper {
+
+template<typename _Ret, typename _Res, typename _Fn>
+static inline _Ret result_map(_Res && obj, _Fn && op) {
+    auto ret = co_await obj;
+    co_return ret.map(std::forward<_Fn>(op));
+}
+
+template<typename _Ret, typename _Res, typename _Fn>
+static inline _Ret result_map_err(_Res && obj, _Fn && op) {
+    auto ret = co_await obj;
+    co_return ret.map_err(std::forward<_Fn>(op));
+}
+
+template<typename, typename, typename, typename = void>
+struct and_then;
+
+template<template<typename, typename> typename _Result, template<typename, typename> typename _Input, typename _Fn,
+    typename _Ok, typename _Err, typename _Other>
+struct and_then<_Result<_Ok, _Err>, _Input<_Other, _Err>, _Fn,
+    std::enable_if_t<std::is_same_v<_Result<_Ok, _Err>, std::invoke_result_t<_Fn, _Other>>>> {
+    template<typename _Res>
+    static inline _Result<_Ok, _Err> call(_Res && __obj, _Fn && __fn) {
+        _Res obj = std::move(__obj);
+        _Fn fn = std::move(__fn);
+        auto ret = co_await obj;
+        if (ret.is_ok()) {
+            co_return co_await fn(ret.take_ok());
+        } else {
+            co_return _Result<_Ok, _Err>::sync_type::err(ret.take_err());
+        }
+    }
+};
+
+template<template<typename, typename> typename _Result, template<typename, typename> typename _Input, typename _Fn,
+    typename _Ok, typename _Err, typename _Other>
+struct and_then<_Result<_Ok, _Err>, _Input<_Other, _Err>, _Fn,
+    std::enable_if_t<!std::is_same_v<_Result<_Ok, _Err>, std::invoke_result_t<_Fn, _Other>>>> {
+
+    template<typename _Res, typename... Args, size_t... I>
+    static inline typename _Result<_Ok, _Err>::sync_type call_and_then(
+        _Res & ret, std::tuple<_Fn, Args...> & args, std::index_sequence<I...>) {
+        return ret.and_then(std::get<I>(args)...);
+    }
+
+    template<typename _Res, typename... Args>
+    static inline _Result<_Ok, _Err> call(_Res && __obj, _Fn && __fn, Args &&... __args) {
+        _Res obj = std::move(__obj);
+        std::tuple<_Fn, Args...> tuple = std::make_tuple(std::move(__fn), std::forward<Args>(__args)...);
+        auto ret = co_await obj;
+        co_return call_and_then(ret, tuple, std::make_index_sequence<sizeof...(Args) + 1>());
+    }
+};
+
+template<typename _Ret, typename _Res, typename _Fn, typename... Args>
+static inline _Ret result_and_then(_Res && obj, _Fn && op, Args &&... args) {
+    return and_then<_Ret, _Res, _Fn>::call(std::forward<_Res>(obj), std::forward<_Fn>(op));
+}
+
+template<typename, typename, typename = void>
+struct or_else;
+
+template<template<typename, typename> typename _Result, typename _Fn, typename _Ok, typename _Err>
+struct or_else<_Result<_Ok, _Err>, _Fn,
+    std::enable_if_t<std::is_same_v<_Result<_Ok, _Err>, std::invoke_result_t<_Fn, _Err>>>> {
+    template<typename _Res>
+    static inline _Result<_Ok, _Err> call(_Res && __obj, _Fn && __fn) {
+        _Res obj = std::move(__obj);
+        _Fn fn = std::move(__fn);
+        auto ret = co_await obj;
+        if (ret.is_err()) {
+            co_return co_await fn(ret.take_err());
+        } else {
+            co_return _Result<_Ok, _Err>::sync_type::ok(ret.take_ok());
+        }
+    }
+};
+
+template<template<typename, typename> typename _Result, typename _Fn, typename _Ok, typename _Err>
+struct or_else<_Result<_Ok, _Err>, _Fn,
+    std::enable_if_t<!std::is_same_v<_Result<_Ok, _Err>, std::invoke_result_t<_Fn, _Err>>>> {
+
+    template<typename _Res, typename... Args, size_t... I>
+    static inline typename _Result<_Ok, _Err>::sync_type call_or_else(
+        _Res & ret, std::tuple<_Fn, Args...> & args, std::index_sequence<I...>) {
+        return ret.or_else(std::get<I>(args)...);
+    }
+
+    template<typename _Res, typename... Args>
+    static inline _Result<_Ok, _Err> call(_Res && __obj, _Fn && __fn, Args &&... __args) {
+        _Res obj = std::move(__obj);
+        std::tuple<_Fn, Args...> tuple = std::make_tuple(std::move(__fn), std::forward<Args>(__args)...);
+        auto ret = co_await obj;
+        co_return call_or_else(ret, tuple, std::make_index_sequence<sizeof...(Args) + 1>());
+    }
+};
+
+template<typename _Ret, typename _Res, typename _Fn, typename... Args>
+static inline _Ret result_or_else(_Res && obj, _Fn && op, Args &&... args) {
+    return or_else<_Ret, _Fn>::call(std::forward<_Res>(obj), std::forward<_Fn>(op), std::forward<Args>(args)...);
+}
+
+}
+
+template<typename _Ok, typename _Err>
+template<typename _Fn>
+inline result<std::invoke_result_t<_Fn, _Ok>, _Err> result<_Ok, _Err>::map(_Fn && op) noexcept {
+    using return_type = result<std::invoke_result_t<_Fn, _Ok>, _Err>;
+    return helper::result_map<return_type>(std::move(*this), std::forward<_Fn>(op));
+}
+
+template<typename _Ok, typename _Err>
+template<typename _Fn>
+inline result<_Ok, std::invoke_result_t<_Fn, _Err>> result<_Ok, _Err>::map_err(_Fn && op) noexcept {
+    using return_type = result<_Ok, std::invoke_result_t<_Fn, _Err>>;
+    return helper::result_map_err<return_type>(std::move(*this), std::forward<_Fn>(op));
+}
+
+template<typename _Ok, typename _Err>
+template<typename _Fn, typename... Args>
+inline typename result<_Ok, _Err>::template require_same_err_t<_Fn> result<_Ok, _Err>::and_then(
+    _Fn && op, Args &&... args) noexcept {
+    using return_type = result<_Ok, _Err>::require_same_err_t<_Fn>;
+    return helper::result_and_then<return_type>(std::move(*this), std::forward<_Fn>(op), std::forward<Args>(args)...);
+}
+
+template<typename _Ok, typename _Err>
+template<typename _Fn, typename... Args>
+inline typename result<_Ok, _Err>::template require_same_ok_t<_Fn> result<_Ok, _Err>::or_else(
+    _Fn && op, Args &&... args) noexcept {
+    using return_type = result<_Ok, _Err>::require_same_ok_t<_Fn>;
+    return helper::result_or_else<return_type>(std::move(*this), std::forward<_Fn>(op), std::forward<Args>(args)...);
+}
+
+}}
+
+#endif

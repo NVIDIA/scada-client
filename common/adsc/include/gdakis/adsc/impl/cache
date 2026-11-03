@@ -1,0 +1,1000 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_ADSC_IMPL_CACHE
+#define GDAKIS_ADSC_IMPL_CACHE
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+#  include <gdakis/umem/cuda>
+#endif
+
+#include <gdakis/adsc/util>
+
+GDAKIS_ADSC_SIMPLE_NS {
+GDAKIS_ADSC_UNIT(cache) {
+
+#if defined(__CUDACC__)
+template<typename _Cache, typename _CL_Ref>
+__device__ static void invalidate_fn(_Cache * cache, std::size_t id, _CL_Ref * ref) {
+    cache->invalidate_cl(ref[0]);
+}
+#endif
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+inline typename cache<_Sco, _CL_Ref, _Ways>::template handle<_Allocator> cache<_Sco, _CL_Ref, _Ways>::build(
+    std::size_t num_cls, typename _CL_Ref::val_type * data_ptr) noexcept {
+    auto cl_ids = umem::mem<_Allocator, cl_id_type[]>::alloc(
+        num_cls, [] __host__ __device__(std::size_t id, cl_id_type * cl_id) { *cl_id = cache::invalid_cl_id; });
+    auto set_seqlocks = umem::mem<_Allocator, seqlock[]>::alloc(
+        num_cls / _Ways, [] __host__ __device__(std::size_t id, seqlock * seqlock) { seqlock->init(); });
+    auto cl_seqlocks = umem::mem<_Allocator, seqlock[]>::alloc(
+        num_cls, [] __host__ __device__(std::size_t id, seqlock * seqlock) { seqlock->init(); });
+    auto set_cnts = umem::mem<_Allocator, unsigned[]>::alloc(
+        num_cls / _Ways, [] __host__ __device__(std::size_t id, unsigned * cnt) { *cnt = 0; });
+    typename cache<_Sco, _CL_Ref, _Ways>::template handle<_Allocator>::template ptr<meta_type> meta = nullptr;
+    typename cache<_Sco, _CL_Ref, _Ways>::template handle<_Allocator>::template ptr<set_meta_type> set_meta = nullptr;
+
+    if constexpr (!std::is_same_v<meta_type, nullmeta_t>)
+        meta = umem::mem<_Allocator, meta_type[]>::alloc(num_cls);
+
+    if constexpr (!std::is_same_v<set_meta_type, nullsetmeta_t>)
+        set_meta = umem::mem<_Allocator, set_meta_type[]>::alloc(num_cls / _Ways);
+
+    auto _cl_ids = cl_ids.get();
+    auto _meta = meta.get();
+    auto _set_meta = set_meta.get();
+
+    auto cl_refs = umem::mem<_Allocator, cl_ref_type[]>::alloc(
+        num_cls, [data_ptr, _cl_ids, _meta, _set_meta] __host__ __device__(std::size_t id, cl_ref_type * cl_ref) {
+            new (cl_ref) cl_ref_type(id, _cl_ids[id], data_ptr + id * cl_size,
+                _meta == nullptr ? nullptr : (_meta + id), _set_meta == nullptr ? nullptr : (_set_meta + id / _Ways));
+        });
+
+    auto _cache = umem::mem<_Allocator, cache>::alloc(num_cls, data_ptr, cl_ids.get(), meta.get(), set_meta.get(),
+        cl_refs.get(), set_seqlocks.get(), cl_seqlocks.get(), set_cnts.get());
+    return typename cache<_Sco, _CL_Ref, _Ways>::template handle<_Allocator>(num_cls, data_ptr, std::move(cl_ids),
+        std::move(meta), std::move(set_meta), std::move(cl_refs), std::move(set_seqlocks), std::move(cl_seqlocks),
+        std::move(set_cnts), std::move(_cache));
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+inline cache<_Sco, _CL_Ref, _Ways>::handle<_Allocator>::handle(std::size_t num_cls, val_type * data_ptr,
+    ptr<cl_id_type> && cls_ids, ptr<meta_type> && meta, ptr<set_meta_type> && set_meta, ptr<cl_ref_type> && cl_refs,
+    ptr<seqlock> && set_seqlocks, ptr<seqlock> && cl_seqlocks, ptr<unsigned> && set_cnts, ptr<cache> && cache) noexcept
+    : cl_ids_(std::move(cls_ids)),
+      meta_(std::move(meta)),
+      set_meta_(std::move(set_meta)),
+      cl_refs_(std::move(cl_refs)),
+      set_seqlocks_(std::move(set_seqlocks)),
+      cl_seqlocks_(std::move(cl_seqlocks)),
+      set_cnts_(std::move(set_cnts)),
+      num_cls_(num_cls),
+      cache_(std::move(cache)) {}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+inline cache<_Sco, _CL_Ref, _Ways> * cache<_Sco, _CL_Ref, _Ways>::handle<_Allocator>::get() const noexcept {
+    return cache_.get();
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+inline typename _CL_Ref::meta_type * cache<_Sco, _CL_Ref, _Ways>::handle<_Allocator>::get_meta() const noexcept {
+    return meta_.get();
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+inline typename _CL_Ref::set_meta_type *
+cache<_Sco, _CL_Ref, _Ways>::handle<_Allocator>::get_set_meta() const noexcept {
+    return set_meta_.get();
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+inline std::size_t cache<_Sco, _CL_Ref, _Ways>::handle<_Allocator>::num_cls() const noexcept {
+    return num_cls_;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+inline void cache<_Sco, _CL_Ref, _Ways>::handle<_Allocator>::invalidate_cache() const noexcept {
+    if constexpr (!std::is_same_v<_Allocator, umem::cpu>) {
+#if defined(__CUDACC__)
+        auto cache_ptr = cache_.get();
+        _Allocator::call_map(cl_refs_.get(), num_cls_,
+            [cache_ptr] __device__(std::size_t id, cl_ref_type * ref) { invalidate_fn(cache_ptr, id, ref); });
+        auto ret = cudaStreamSynchronize(_Allocator::get_stream());
+        printf("cudaStreamSynchronize ret: %d\n", ret);
+#endif
+        // #else any other _Allocator type is UNSUPPORTED.
+        // this needs to be supported when a new device type
+        // like DPU is brought into the picture
+    } else {
+        _Allocator::call_map(cl_refs_.get(), num_cls_,
+            [cache = cache_.get()](std::size_t id, cl_ref_type * ref) { cache->invalidate_cl(ref[0]); });
+    }
+}
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+template<typename _Cache, typename _Policies>
+__global__ void flush_kernel(_Cache * cache, _Policies policies) {
+    auto tid = threadIdx.x + blockDim.x * blockIdx.x;
+    if (tid < cache->num_cls()) {
+        auto way = tid % cache->num_ways;
+        auto set = tid / cache->num_ways;
+        cache->flush_cl(cache->cl_ref(set, way), policies);
+    }
+}
+
+#endif
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Allocator>
+template<typename _Policies>
+inline void cache<_Sco, _CL_Ref, _Ways>::handle<_Allocator>::flush_cache(const _Policies & policies_) const noexcept {
+    if constexpr (std::is_same_v<_Allocator, umem::cpu>) {
+        _Allocator::call_map(
+            cl_refs_.get(), num_cls_, [cache = cache_.get(), policies = policies_](std::size_t id, cl_ref_type * ref) {
+                cache->flush_cl(ref[0], policies);
+            });
+    } else {
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+        const auto blk_size = 128;
+        const auto n_blks = (num_cls_ + blk_size - 1) / blk_size;
+        flush_kernel<<<n_blks, blk_size, 0, _Allocator::get_stream()>>>(cache_.get(), policies_);
+        auto ret = cudaStreamSynchronize(_Allocator::get_stream());
+#endif
+    }
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline cache<_Sco, _CL_Ref, _Ways>::cache(std::size_t num_cls, val_type * data_ptr,
+    cl_id_type * cl_ids, meta_type * meta, set_meta_type * set_meta, cl_ref_type * cl_refs, seqlock * set_seqlocks,
+    seqlock * cl_seqlocks, unsigned * set_cnts) noexcept
+    : num_cls_(num_cls),
+      num_sets_(num_cls / _Ways),
+      set_seqlocks_(set_seqlocks),
+      cl_seqlocks_(cl_seqlocks),
+      set_cnts_(set_cnts),
+      cl_ids_(cl_ids),
+      vals_(data_ptr),
+      meta_(meta),
+      set_meta_(set_meta),
+      cl_refs_(cl_refs) {}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+inline std::size_t cache<_Sco, _CL_Ref, _Ways>::num_cls() const noexcept {
+    return num_cls_;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline _CL_Ref & cache<_Sco, _CL_Ref, _Ways>::cl_ref(
+    const set_id_type set_id, const unsigned way) noexcept {
+    return cl_refs_[set_id * _Ways + way];
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline typename cache<_Sco, _CL_Ref, _Ways>::cl_id_type cache<_Sco, _CL_Ref, _Ways>::cl_id(
+    const key_type & key, const _Policies & policies) const noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(policies.key_to_cl_id())>)
+        return policies.key_to_cl_id()(key);
+    else
+        return key / cl_size;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline typename cache<_Sco, _CL_Ref, _Ways>::cl_id_type & cache<_Sco, _CL_Ref, _Ways>::cl_id(
+    const _CL_Ref & cl_ref) noexcept {
+    return cl_ref.cl_id();
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline unsigned cache<_Sco, _CL_Ref, _Ways>::cl_offset(
+    const key_type & key, const _Policies & policies) const noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(policies.key_to_cl_offset())>)
+        return policies.key_to_cl_offset()(key);
+    else
+        return key % cl_size;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline typename cache<_Sco, _CL_Ref, _Ways>::set_id_type cache<_Sco, _CL_Ref, _Ways>::set_id(
+    const cl_id_type cl_id, const _Policies & policies) const noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(policies.cl_to_set())>)
+        return policies.cl_to_set()(cl_id, num_sets_);
+    else
+        return cl_id % num_sets_;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline typename cache<_Sco, _CL_Ref, _Ways>::key_type cache<_Sco, _CL_Ref, _Ways>::nth_key_of_cl(
+    const cl_id_type cl_id, const unsigned n, const _Policies & policies) const noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(policies.nth_key_of_cl())>)
+        return policies.nth_key_of_cl()(cl_id, n);
+    else
+        return cl_id * cl_size + n;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline typename cache<_Sco, _CL_Ref, _Ways>::cl_id_type & cache<_Sco, _CL_Ref, _Ways>::cl_id(
+    const set_id_type set_id, const unsigned way) noexcept {
+    return cl_ids_[set_id * num_ways + way];
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline typename cache<_Sco, _CL_Ref, _Ways>::seqlock & cache<_Sco, _CL_Ref, _Ways>::cl_seqlock(
+    const set_id_type set_id, const unsigned way) noexcept {
+    return cl_seqlocks_[set_id * num_ways + way];
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline typename cache<_Sco, _CL_Ref, _Ways>::seqlock & cache<_Sco, _CL_Ref, _Ways>::set_seqlock(
+    const set_id_type set_id) noexcept {
+    return set_seqlocks_[set_id];
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline void cache<_Sco, _CL_Ref, _Ways>::invalidate_cl(cl_ref_type & ref) const noexcept {
+    std::size_t id = &ref - cl_refs_;
+    if (id < num_cls_) {
+        cl_seqlocks_[id].write_lock();
+        ref.invalidate();
+        cl_seqlocks_[id].write_unlock();
+    }
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline void cache<_Sco, _CL_Ref, _Ways>::flush_cl(
+    cl_ref_type & ref, const _Policies & policies) noexcept {
+    std::size_t id = &ref - cl_refs_;
+    if (id < num_cls_) {
+        cl_seqlocks_[id].write_lock();
+        auto set = id / _Ways;
+        auto way = id % _Ways;
+        victim_thread(set, way, policies);
+        ref.mark_clean();
+        cl_seqlocks_[id].write_unlock();
+    }
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline typename _CL_Ref::val_type * cache<_Sco, _CL_Ref, _Ways>::val(
+    const set_id_type set_id, const unsigned way, const std::size_t cl_offset) noexcept {
+    return vals_ + ((((set_id * _Ways) + way) * cl_size) + cl_offset);
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group>
+__host__ __device__ inline unsigned cache<_Sco, _CL_Ref, _Ways>::search_ways_group(
+    const _Group & group, const cl_id_type cl_id, const set_id_type set_id) const noexcept {
+#if defined(__CUDA_ARCH__)
+    auto effective_lane_id = group.thread_rank();
+    auto group_count = group.size();
+#else
+    auto group_count = popc(group);
+    auto lane_id = 0;
+    auto effective_lane_id = popc(group & ((1 << lane_id) - 1));
+
+#endif
+    auto cl_ids = cl_ids_ + set_id * _Ways;
+
+    bool is_found = false;
+    unsigned way = _Ways;
+    /* If using cooperative groups, get the make rank0 as the leader by default. If the below loop
+       is not able to change the value of the way then this selected leader will shuffle the value which is 32, else
+       shuffling will be done by the one that's breaking the loop
+     */
+#if defined(__CUDA_ARCH__)
+    auto leader = 0;
+#endif
+    for (unsigned i = effective_lane_id; i < _Ways; i += group_count) {
+        is_found = cl_id == cl_ids[i];
+        if (is_found) {
+            way = i;
+#if defined(__CUDA_ARCH__)
+            leader = group.thread_rank();
+#endif
+            break;
+        }
+    }
+#if defined(__CUDA_ARCH__)
+    leader = cooperative_groups::reduce(group, leader, cooperative_groups::greater<int>());
+    way = group.shfl(way, leader);
+#endif
+    return way;
+}
+
+#if defined(__CUDACC__)
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::miss_group(
+    const _Group & group, const set_id_type set_id, const unsigned way, const _Policies & access_policies) noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(access_policies.miss())>)
+        return access_policies.miss()(group, cl_ref(set_id, way));
+    else
+        return 0;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline unsigned cache<_Sco, _CL_Ref, _Ways>::evict_group(
+    const _Group & group, const set_id_type set_id, const _Policies & access_policies) noexcept {
+    set_meta_type & set_meta = set_meta_[set_id];
+
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(access_policies.evict())>)
+        return access_policies.evict()(group, set_meta) % _Ways;
+    else
+        return single_thread_broadcast(group, [this, set_id] { return this->set_cnts_[set_id]++ % _Ways; });
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::victim_group(
+    const _Group & group, const set_id_type set_id, const unsigned way, const _Policies & access_policies) noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(access_policies.victim())>)
+        return access_policies.victim()(group, cl_ref(set_id, way));
+    else
+        return 0;
+}
+
+#endif
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline unsigned cache<_Sco, _CL_Ref, _Ways>::evict_thread(
+    const set_id_type set_id, const _Policies & access_policies) noexcept {
+    set_meta_type & set_meta = set_meta_[set_id];
+
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(access_policies.evict())>)
+        return access_policies.evict()(set_meta) % _Ways;
+    else
+        return set_cnts_[set_id]++ % _Ways;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::miss_thread(
+    const set_id_type set_id, const unsigned way, const _Policies & access_policies) noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(access_policies.miss())>)
+        return access_policies.miss()(cl_ref(set_id, way));
+    else
+        return 0;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::victim_thread(
+    const set_id_type set_id, const unsigned way, const _Policies & access_policies) noexcept {
+    if constexpr (!std::is_same_v<undefined_policy_type, decltype(access_policies.victim())>) {
+        auto & ref = cl_ref(set_id, way);
+        return access_policies.victim()(ref);
+    }
+    return 0;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::get(const key_type & key, val_type & val) noexcept {
+    return get(key, val, default_policies_);
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::put(const key_type & key, const val_type & val) noexcept {
+    return put(key, val, default_policies_);
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::put(
+    const key_type & key, const val_type & val_, const _Policies & policies) noexcept {
+#if defined(__CUDA_ARCH__)
+    auto active_group = cooperative_groups::coalesced_threads();
+#else
+    unsigned active_group = 1;
+#endif
+    auto cl_id_ = cl_id(key, policies);
+    auto cl_offset_ = cl_offset(key, policies);
+    auto set_id_ = set_id(cl_id_, policies);
+
+#if defined(__CUDA_ARCH__)
+    auto cl_group = cooperative_groups::labeled_partition(active_group, static_cast<std::uint64_t>(cl_id_));
+#else
+    unsigned cl_group = active_group;
+#endif
+
+    unsigned way = _Ways;
+
+    auto ret = miss_prologue(
+        cl_group, cl_id_, cl_offset_, val_, way, policies,
+        [this](auto & group, const set_id_type set_id, const _Policies & policies) {
+            return single_thread_broadcast(
+                group, [this, set_id, &policies] { return this->evict_thread(set_id, policies); });
+        },
+        [this](auto & group, const set_id_type & set_id, const unsigned way, const cl_id_type & cl_id,
+            const _Policies & policies) {
+            return single_thread_broadcast(group, [this, &set_id, way, &cl_id, &policies] {
+                auto ret = this->victim_thread(set_id, way, policies);
+                this->cl_id(set_id, way) = cl_id;
+                return ret;
+            });
+        },
+        [this](auto & group, const set_id_type & set_id, const unsigned way, const cl_id_type & cl_id,
+            const _Policies & policies) {
+            return single_thread_broadcast(group, [this, &set_id, way, &policies] {
+                // cl_size counts values: a single-value line is completely overwritten by put.
+                if constexpr (cl_size == 1) {
+                    return 0;
+                }
+                int ret = this->miss_thread(set_id, way, policies);
+                if (ret < 0)
+                    this->cl_id(set_id, way) = invalid_cl_id;
+                return ret;
+            });
+        });
+
+    if (ret == 0) {
+        ::memcpy(reinterpret_cast<void *>(val(set_id_, way, cl_offset_)), &val_, sizeof(val_type));
+        cl_ref(set_id_, way).mark_dirty();
+    }
+
+    miss_epilogue(cl_group, cl_id_, set_id_, way);
+
+    return ret;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::__victim_thread(unsigned & group,
+    const set_id_type & set_id, const unsigned way, const cl_id_type & cl_id, const _Policies & policies) noexcept {
+    return single_thread_broadcast(group, [this, &set_id, way, &cl_id, &policies] {
+        auto ret = this->victim_thread(set_id, way, policies);
+        this->cl_id(set_id, way) = cl_id;
+        return ret;
+    });
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::__miss_thread(unsigned & group, const set_id_type & set_id,
+    const unsigned way, const cl_id_type & cl_id, const _Policies & policies) noexcept {
+    return single_thread_broadcast(group, [this, &set_id, way, &cl_id, &policies] {
+        int ret = this->miss_thread(set_id, way, policies);
+        if (ret < 0)
+            this->cl_id(set_id, way) = invalid_cl_id;
+        return ret;
+    });
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline unsigned cache<_Sco, _CL_Ref, _Ways>::__evict_thread(
+    unsigned & group, const set_id_type set_id, const _Policies & policies) noexcept {
+    return single_thread(group, [this, set_id, &policies] { this->evict_thread(set_id, policies); });
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies, typename _Evict_Processing, typename _Victim_Processing,
+    typename _Fill_Processing>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::miss_prologue(const _Group & group,
+    const cl_id_type & cl_id, const unsigned cl_offset, const val_type & val, unsigned & way,
+    const _Policies & policies, _Evict_Processing && evict_process, _Victim_Processing && victim_process,
+    _Fill_Processing && fill_process) noexcept {
+    int ret = 0;
+    auto set_id_ = set_id(cl_id, policies);
+    single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_lock(); });
+
+    way = search_ways_group(group, cl_id, set_id_);
+
+    if (way == _Ways) {
+        way = evict_process(group, set_id_, policies);
+    }
+
+    cl_id_type way_cl_id = single_thread_broadcast(group, [this, set_id_, way] {
+        this->cl_seqlock(set_id_, way).write_lock();
+        return this->cl_id(set_id_, way);
+    });
+
+    bool is_match = cl_id == way_cl_id;
+
+    if (!is_match) {
+        ret = victim_process(group, set_id_, way, cl_id, policies);
+        single_thread(group, [this, set_id_, way] { this->cl_ref(set_id_, way).reset(); });
+    }
+
+    single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_unlock(); });
+
+    if (!is_match) {
+        single_thread(group, [this, set_id_, way, cl_id] { this->cl_ref(set_id_, way).cl_id() = cl_id; });
+        ret |= fill_process(group, set_id_, way, cl_id, policies);
+    }
+
+    return ret;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group>
+__host__ __device__ inline void cache<_Sco, _CL_Ref, _Ways>::miss_epilogue(
+    const _Group & group, const cl_id_type & cl_id, const set_id_type set_id_, const unsigned way) noexcept {
+    single_thread(group, [this, set_id_, way] { this->cl_seqlock(set_id_, way).write_unlock(); });
+}
+
+// Async cache line acquisition methods
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::async_hit_prologue(const _Group & group,
+    const cl_id_type & cl_id, set_id_type & set_id_, unsigned & way, const _Policies & policies) noexcept {
+    int ret = 0;
+    // Enforce that each thread uses its own single-thread group to avoid divergence deadlocks
+    assert(group.size() == 1
+        && "async_hit_prologue must be called with single-thread group when threads have different cl_ids");
+
+    // Compute set_id for this cache line
+    set_id_ = set_id(cl_id, policies);
+
+    // Lock set seqlock
+    single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_lock(); });
+
+    // Search for cache line
+    way = search_ways_group(group, cl_id, set_id_);
+
+    if (way < _Ways) {
+        // Found it - lock the cache line
+        single_thread(group, [this, set_id_, way] { this->cl_seqlock(set_id_, way).write_lock(); });
+
+        // Verify it's still a hit
+        auto way_cl_id = single_thread_broadcast(group, [this, set_id_, way] { return this->cl_id(set_id_, way); });
+
+        bool is_match = (cl_id == way_cl_id);
+
+        // Unlock set
+        single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_unlock(); });
+
+        if (is_match) {
+            // Cache hit! Return with CL lock held
+            ret = 0;
+        } else {
+            // False hit - unlock CL
+            single_thread(group, [this, set_id_, way] { this->cl_seqlock(set_id_, way).write_unlock(); });
+            ret = -ENOENT;
+        }
+    } else {
+        // Way not found - unlock set
+        single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_unlock(); });
+
+        ret = -ENOENT;
+    }
+    return ret;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies, typename _Evict_Processing, typename _Victim_Processing>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::async_miss_prologue(const _Group & group,
+    const cl_id_type & cl_id, set_id_type & set_id_, unsigned & way, const _Policies & policies,
+    _Evict_Processing && evict_process, _Victim_Processing && victim_process) noexcept {
+    // Enforce that each thread uses its own single-thread group to avoid divergence deadlocks
+    assert(group.size() == 1
+        && "async_miss_prologue must be called with single-thread group when threads have different cl_ids");
+
+    // Compute set_id
+    set_id_ = set_id(cl_id, policies);
+
+    // Lock set
+    single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_lock(); });
+
+    // Search for way
+    way = search_ways_group(group, cl_id, set_id_);
+
+    // If way not found, evict
+    if (way == _Ways) {
+        way = evict_process(group, set_id_, policies);
+    }
+
+    // Lock cache line
+    auto way_cl_id = single_thread_broadcast(group, [this, set_id_, way] {
+        this->cl_seqlock(set_id_, way).write_lock();
+        return this->cl_id(set_id_, way);
+    });
+
+    bool is_match = (cl_id == way_cl_id);
+
+    // Handle victim if needed
+    if (!is_match) {
+        int ret = victim_process(group, set_id_, way, cl_id, policies);
+
+        if (ret != 0) {
+            // Victim handling failed - unlock and return error
+            single_thread(group, [this, set_id_, way] { this->cl_seqlock(set_id_, way).write_unlock(); });
+            single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_unlock(); });
+            return ret;
+        }
+
+        // Reset cache line reference as victim handling is successful
+        single_thread(group, [this, set_id_, way] { this->cl_ref(set_id_, way).reset(); });
+        single_thread(group, [this, set_id_, way, cl_id] { this->cl_ref(set_id_, way).cl_id() = cl_id; });
+    }
+
+    // Unlock set
+    single_thread(group, [this, set_id_] { this->set_seqlock(set_id_).write_unlock(); });
+
+    // Return with CL lock held
+    return 0;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group>
+__host__ __device__ inline void cache<_Sco, _CL_Ref, _Ways>::async_epilogue(
+    const _Group & group, const set_id_type set_id_, const unsigned way) noexcept {
+    single_thread(group, [this, set_id_, way] { this->cl_seqlock(set_id_, way).write_unlock(); });
+}
+
+#if 0
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies, typename _Memcpy>
+__host__ __device__
+inline
+int
+cache<_Sco, _CL_Ref, _Ways>::__get_hit_war(group & group, const cl_id_type & cl_id_, const unsigned cl_offset, val_type & val_, const _Policies & policies, _Memcpy && memcpy_) noexcept
+{
+#  if !defined(NDEBUG) && defined(__CUDA_ARCH__)
+    assert(cuda::this_warp::match(group, reinterpret_cast<uintptr_t>(this)) == group);
+#  endif
+
+    unsigned set_before, set_after;
+    unsigned way = _Ways;
+    bool cont = true;
+    bool done = false;
+    auto set_id_ = set_id(cl_id_, policies);
+
+    do {
+        set_before = this->set_seqlock(set_id_).read_lock();
+#  if defined(__CUDA_ARCH__)
+	auto __group = cuda::lanemask_eq();
+        way = search_ways_warp(__group, cl_id_, set_id_);
+#  else
+        way = search_ways_warp(group, cl_id_, set_id_);
+#  endif
+
+        if (way < _Ways) {
+            bool is_hit = false;
+            unsigned way_before = this->cl_seqlock(set_id_, way).read_lock();
+
+            auto way_cl_id = cl_id(set_id_, way);
+
+            if ((!done) and (cl_id_ == way_cl_id)) {
+                is_hit = true;
+                memcpy_(&val_, val(set_id_, way, cl_offset), sizeof(val_type));
+
+            }
+
+            auto way_after = this->cl_seqlock(set_id_, way).read_unlock();
+
+            if (!done)
+                done = is_hit and (way_before == way_after);
+            if (done)
+                return 0;
+        }
+
+        set_after = this->set_seqlock(set_id_).read_unlock();
+        cont = set_before != set_after;
+    } while (cont);
+
+    return -ENOENT;
+}
+#endif
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies, typename _Memcpy>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::__get_hit_group(const _Group & group,
+    const cl_id_type & cl_id_, const unsigned cl_offset, val_type & val_, const _Policies & policies,
+    _Memcpy && memcpy_) noexcept {
+    unsigned set_before, set_after;
+    unsigned way = _Ways;
+    bool cont = true;
+    auto set_id_ = set_id(cl_id_, policies);
+    do {
+        set_before = single_thread_broadcast(group, [this, set_id_] { return this->set_seqlock(set_id_).read_lock(); });
+
+        way = search_ways_group(group, cl_id_, set_id_);
+
+        if (way < _Ways) {
+            unsigned way_before = single_thread_broadcast(
+                group, [this, set_id_, way] { return this->cl_seqlock(set_id_, way).read_lock(); });
+
+            auto way_cl_id = single_thread_broadcast(group, [this, set_id_, way] { return this->cl_id(set_id_, way); });
+
+            if ((cl_id_ == way_cl_id)) {
+                memcpy_(&val_, val(set_id_, way, cl_offset), sizeof(val_type));
+            }
+
+            auto way_after = single_thread_broadcast(
+                group, [this, set_id_, way] { return this->cl_seqlock(set_id_, way).read_unlock(); });
+            if ((cl_id_ == way_cl_id) and (way_before == way_after))
+                return 0;
+        }
+
+        set_after
+            = single_thread_broadcast(group, [this, set_id_] { return this->set_seqlock(set_id_).read_unlock(); });
+        cont = set_before != set_after;
+    } while (cont);
+
+    return -ENOENT;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Policies>
+__host__ __device__ inline int cache<_Sco, _CL_Ref, _Ways>::get(
+    const key_type & key, val_type & val_, const _Policies & policies) noexcept {
+#if defined(__CUDA_ARCH__)
+    auto active_group = cooperative_groups::coalesced_threads();
+#else
+    unsigned active_group = 1;
+#endif
+
+    auto cl_id_ = cl_id(key, policies);
+    auto cl_offset_ = cl_offset(key, policies);
+    auto set_id_ = set_id(cl_id_, policies);
+
+#if defined(__CUDA_ARCH__)
+    auto cl_group = cooperative_groups::labeled_partition(active_group, static_cast<std::uint64_t>(cl_id_));
+#else
+    unsigned cl_group = active_group;
+#endif
+
+    auto ret = __get_hit_group(
+        cl_group, cl_id_, cl_offset_, val_, policies, [](val_type * dst, val_type * src, const size_t bytes) {
+            ::memcpy(reinterpret_cast<void *>(dst), src, bytes);
+        });
+
+#if defined(__CUDA_ARCH__)
+    auto new_cl_group = cooperative_groups::binary_partition(cl_group, (ret == -ENOENT));
+#else
+    unsigned new_cl_group = 1;
+#endif
+
+    unsigned way = _Ways;
+
+    if (ret == -ENOENT) {
+        ret = miss_prologue(
+            new_cl_group, cl_id_, cl_offset_, val_, way, policies,
+            [this](auto & group, const set_id_type set_id, const _Policies & policies) {
+                return single_thread_broadcast(
+                    group, [this, set_id, &policies] { return this->evict_thread(set_id, policies); });
+            },
+            [this](auto & group, const set_id_type & set_id, const unsigned way, const cl_id_type & cl_id,
+                const _Policies & policies) {
+                return single_thread_broadcast(group, [this, &set_id, way, &cl_id, &policies] {
+                    auto ret = this->victim_thread(set_id, way, policies);
+                    this->cl_id(set_id, way) = cl_id;
+                    return ret;
+                });
+            },
+            [this](auto & group, const set_id_type & set_id, const unsigned way, const cl_id_type & cl_id,
+                const _Policies & policies) {
+                return single_thread_broadcast(group, [this, &set_id, way, &policies] {
+                    int ret = this->miss_thread(set_id, way, policies);
+                    if (ret < 0)
+                        this->cl_id(set_id, way) = invalid_cl_id;
+                    return ret;
+                });
+            });
+
+        if (ret == 0)
+            ::memcpy(reinterpret_cast<void *>(&val_), val(set_id_, way, cl_offset_), sizeof(val_type));
+
+        miss_epilogue(new_cl_group, cl_id_, set_id_, way);
+    }
+
+    return ret;
+}
+
+#if defined(__CUDACC__)
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::__miss_group(const _Group & group, const set_id_type & set_id,
+    unsigned way, const cl_id_type & cl_id, const _Policies & policies) noexcept {
+    int ret = this->miss_group(group, set_id, way, policies);
+    auto error_group = group.ballot(ret != 0);
+    if (error_group)
+        this->cl_id(set_id, way) = invalid_cl_id;
+    ret = group.shfl(ret, __ffs(error_group));
+    return ret;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::__victim_group(const _Group & group, const set_id_type & set_id,
+    unsigned way, const cl_id_type & cl_id, const _Policies & policies) noexcept {
+    auto ret = this->victim_group(group, set_id, way, policies);
+    single_thread(group, [this, set_id, way, &cl_id, policies] { this->cl_id(set_id, way) = cl_id; });
+
+    return ret;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline unsigned cache<_Sco, _CL_Ref, _Ways>::__evict_group(
+    const _Group & group, const set_id_type set_id, const _Policies & policies) noexcept {
+    this->evict_group(group, set_id, policies);
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::get_group(
+    const _Group & group, const key_type & key, val_type & val) noexcept {
+    return get_group(group, key, val, default_policies_);
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::get_group(
+    const _Group & group, const key_type & key, val_type & val_, const _Policies & policies) noexcept {
+    auto cl_id_ = cl_id(key, policies);
+    auto cl_offset_ = cl_offset(key, policies);
+
+    auto set_id_ = set_id(cl_id_, policies);
+
+    auto ret = __get_hit_group(group, cl_id_, cl_offset_, val_, policies,
+        [&](val_type * dst, val_type * src, const size_t bytes) { group_memcpy(group, dst, src, bytes); });
+
+#  if defined(__CUDA_ARCH__)
+    auto & new_cl_group = group;
+#  else
+    unsigned new_cl_group = gdakis::utils::cuda::this_warp::ballot(group, ret == -ENOENT);
+#  endif
+    unsigned way = _Ways;
+
+    if (ret == -ENOENT) {
+        ret = miss_prologue(
+            new_cl_group, cl_id_, cl_offset_, val_, way, policies,
+            [this](auto & group, const set_id_type set_id, const _Policies & policies) {
+                return this->evict_group(group, set_id, policies);
+            },
+            [this](auto & group, const set_id_type & set_id, unsigned way, const cl_id_type & cl_id,
+                const _Policies & policies) {
+                auto ret = this->victim_group(group, set_id, way, policies);
+                single_thread(group, [this, set_id, way, &cl_id, policies] { this->cl_id(set_id, way) = cl_id; });
+
+                return ret;
+            },
+            [this](auto & group, const set_id_type & set_id, unsigned way, const cl_id_type & cl_id,
+                const _Policies & policies) {
+                int ret = this->miss_group(group, set_id, way, policies);
+#  if defined(__CUDA_ARCH__)
+                auto error_group = group.ballot(ret != 0);
+                if (error_group)
+                    this->cl_id(set_id, way) = invalid_cl_id;
+                ret = group.shfl(ret, __ffs(error_group));
+#  else
+                auto error_group = gdakis::utils::cuda::this_warp::ballot(group, ret != 0);
+                if (error_group)
+                    this->cl_id(set_id, way) = invalid_cl_id;
+                ret = gdakis::utils::cuda::this_warp::shuffle(group, ret, ffs(error_group));
+#  endif
+                return ret;
+            });
+
+        if (ret == 0)
+            group_memcpy(new_cl_group, &val_, val(set_id_, way, cl_offset_), sizeof(val_type));
+
+        miss_epilogue(new_cl_group, cl_id_, set_id_, way);
+    }
+
+    return ret;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::put_group(
+    const _Group & group, const key_type & key, const val_type & val) noexcept {
+    return put_group(group, key, val, default_policies_);
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Policies>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::put_group(
+    const _Group & group, const key_type & key, const val_type & val_, const _Policies & policies) noexcept {
+    auto cl_id_ = cl_id(key, policies);
+    auto cl_offset_ = cl_offset(key, policies);
+
+    auto set_id_ = set_id(cl_id_, policies);
+
+    unsigned way = _Ways;
+
+    auto ret = miss_prologue(
+        group, cl_id_, cl_offset_, val_, way, policies,
+        [this](auto & group, const set_id_type set_id, const _Policies & policies) {
+            return this->evict_group(group, set_id, policies);
+        },
+        [this](auto & group, const set_id_type & set_id, unsigned way, const cl_id_type & cl_id,
+            const _Policies & policies) {
+            auto ret = this->victim_group(group, set_id, way, policies);
+            single_thread(group, [this, set_id, way, &cl_id, policies] { this->cl_id(set_id, way) = cl_id; });
+
+            return ret;
+        },
+        [this](auto & group, const set_id_type & set_id, unsigned way, const cl_id_type & cl_id,
+            const _Policies & policies) {
+            // put_group replaces the entire line when it contains only one value.
+            if constexpr (cl_size == 1) {
+                return 0;
+            }
+            int ret = this->miss_group(group, set_id, way, policies);
+#  if defined(__CUDA_ARCH__)
+            auto error_group = group.ballot(ret != 0);
+            if (error_group)
+                this->cl_id(set_id, way) = invalid_cl_id;
+            ret = group.shfl(ret, __ffs(error_group));
+#  else
+            auto error_group = gdakis::utils::cuda::this_warp::ballot(group, ret != 0);
+            if (error_group)
+                this->cl_id(set_id, way) = invalid_cl_id;
+            ret = gdakis::utils::cuda::this_warp::shuffle(group, ret, ffs(error_group));
+#  endif
+            return ret;
+        });
+
+    if (ret == 0) {
+        group_memcpy(group, val(set_id_, way, cl_offset_), &val_, sizeof(val_type));
+        cl_ref(set_id_, way).mark_dirty();
+    }
+
+    miss_epilogue(group, cl_id_, set_id_, way);
+
+    return ret;
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group>
+__device__ void cache<_Sco, _CL_Ref, _Ways>::copy_cl_data(
+    const _Group & group, const set_id_type set_id, const unsigned way, val_type * dst, const size_t bytes) noexcept {
+    val_type * src = cl_ref(set_id, way).vals();
+    group_memcpy(group, dst, src, bytes);
+}
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+template<typename _Group, typename _Access_Policies, typename _Victim_Processing>
+__device__ inline int cache<_Sco, _CL_Ref, _Ways>::access_async_group(const _Group & group, const cl_id_type & cl_id,
+    set_id_type & set_id_, unsigned & way, bool & is_cache_hit, const _Access_Policies & policies,
+    _Victim_Processing && victim_process) noexcept {
+    // Enforce that each thread uses its own single-thread group to avoid divergence deadlocks
+    assert(group.size() == 1
+        && "access_async_group must be called with single-thread group when threads have different cl_ids");
+
+    // Try cache hit first - call async_hit_prologue
+    int ret = async_hit_prologue(group, cl_id, set_id_, way, policies);
+    if (ret == 0) {
+        // Cache hit!
+        is_cache_hit = true;
+    } else {
+        //Cache miss - acquire cache line via async_miss_prologue
+        ret = async_miss_prologue(
+            group, cl_id, set_id_, way, policies,
+            [this](
+                const auto & g, const set_id_type sid, const auto & pols) { return this->evict_group(g, sid, pols); },
+            std::forward<_Victim_Processing>(victim_process));
+
+        // Set is_cache_hit based on whether miss prologue succeeded or not
+        is_cache_hit = false;
+    }
+
+    // 0 : miss prologue succeeded
+    // -ENOENT : miss prologue failed
+    return ret; // Return with CL lock held if ret == 0
+}
+
+#endif
+
+}}
+
+#endif

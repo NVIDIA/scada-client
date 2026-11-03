@@ -1,0 +1,192 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_CUDA___MDSPAN_IMPL_ITERATOR
+#define SCADA_CUDA___MDSPAN_IMPL_ITERATOR
+
+#include <stdio.h>
+
+SCADA_CUDA_SIMPLE_NS {
+namespace mdspan {
+SCADA_CUDA_UNIT(iterator) {
+
+// TODO: WAR for nvcc to work without a __builtin_is_empty.
+// after fix:
+// iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::iterator(const span_type & index, const index_type & span) noexcept :
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::iterator(
+    const index_type & index, const span_type & span) noexcept
+    : index_(index),
+      span_(span) {}
+
+// Host-device copy constructor
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::iterator(const iterator & other) noexcept
+    : index_(other.index_),
+      span_(other.span_) {}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline typename iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::reference
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator*() const noexcept {
+    return (span_)[index_];
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor> iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator+(
+    const difference_type & index) const noexcept {
+    iterator ret = *this;
+    difference_type pos = index_ + index;
+    if (pos < 0 or pos >= static_cast<difference_type>(span_.size()))
+        ret.index_ = span_.size();
+    else
+        ret.index_ = index;
+    return ret;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor> iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator-(
+    const difference_type & index) const noexcept {
+    iterator ret = *this;
+    difference_type pos = index_ - index;
+    if (pos < 0 or pos >= span_.size())
+        ret.index_ = span_.size();
+    else
+        ret.index_ = index;
+    return ret;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline typename iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::difference_type
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator-(const iterator & other) const noexcept {
+    return index_ - other.index_;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor> &
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator++() noexcept {
+    if (index_ < span_.size())
+        ++index_;
+    return *this;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor> &
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator--() noexcept {
+    if (index_ > 0)
+        ++index_;
+    else
+        index_ = span_.size();
+    //return *this;
+    return this;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor> &
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator+=(const difference_type & n) noexcept {
+    difference_type pos = index_ + n;
+    if (pos < 0 or pos >= span_.size())
+        index_ = span_.size();
+    else
+        index_ = pos;
+    return *this;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor> &
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator-=(const difference_type & n) noexcept {
+    difference_type pos = index_ - n;
+    if (pos < 0 or pos >= span_.size())
+        index_ = span_.size();
+    else
+        index_ = pos;
+    return *this;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor>
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator++(int) noexcept {
+    iterator ret = *this;
+    operator++();
+    return ret;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor>
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator--(int) noexcept {
+    iterator ret = *this;
+    operator--();
+    return ret;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline bool iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator>(const iterator & other) const noexcept {
+    return other.span_.data_handle() == span_.data_handle() and index_ > other.index_;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline bool iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator<(const iterator & other) const noexcept {
+    return other.span_.data_handle() == span_.data_handle() and index_ < other.index_;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline bool iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator>=(const iterator & other) const noexcept {
+    return other.span_.data_handle() == span_.data_handle() and index_ >= other.index_;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline bool iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator<=(const iterator & other) const noexcept {
+    return other.span_.data_handle() == span_.data_handle() and index_ <= other.index_;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline bool iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator==(const iterator & other) const noexcept {
+    return other.span_.data_handle() == span_.data_handle() and other.index_ == index_;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline bool iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator!=(const iterator & other) const noexcept {
+    return other.span_.data_handle() != span_.data_handle() or other.index_ != index_;
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline typename iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::reference
+iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::operator[](const difference_type & idx) noexcept {
+    return (span_)[index_ + idx];
+}
+
+}}
+
+SCADA_CUDA_UNIT(iterator) {
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+static inline mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> begin(
+    const ::cuda::std::mdspan<_Tp, ::cuda::std::extents<_Index, _Extent>, _Layout, _Accessor> & span) noexcept {
+    // TODO: WAR for nvcc to work without a __builtin_is_empty.
+    // after fix:
+    // return mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor>(span, 0);
+    return mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor>(0, span);
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+static inline mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> end(
+    const ::cuda::std::mdspan<_Tp, ::cuda::std::extents<_Index, _Extent>, _Layout, _Accessor> & span) noexcept {
+    return mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor>(span.size(), span);
+}
+
+}
+}
+
+SCADA_CUDA_UNIT(mdspan) {
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+static inline scada::cuda::mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> operator+(
+    const typename scada::cuda::mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::difference_type & n,
+    const scada::cuda::mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> & other) noexcept {
+    return other + n;
+}
+
+}
+
+#endif

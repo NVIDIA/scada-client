@@ -1,0 +1,37 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA___CORE_VERSION
+#define SCADA___CORE_VERSION
+
+#if !defined(SCADA_CORE_VERSION)
+#  define SCADA_CORE_VERSION 1
+#endif
+
+#if !defined(__DOXYGEN__)
+
+#  define ___SCADA_CORE_CONCAT(a, b) a##b
+#  define __SCADA_CORE_CONCAT(a, b) ___SCADA_CORE_CONCAT(a, b)
+
+#  define SCADA_CORE_SIMPLE_NS namespace scada::core
+
+#  define SCADA_CORE_UNIT(name) inline namespace __SCADA_CORE_CONCAT(___, name)
+
+#  define SCADA_CORE_EXPORT_SIMPLE_NS(root, name)                                                                      \
+      namespace root {                                                                                                 \
+      using namespace ::scada::core::__SCADA_CORE_CONCAT(___, name);                                                   \
+      }
+
+#else
+
+#  define SCADA_CORE_NS(version) namespace scada::core::version
+
+#  define SCADA_CORE_UNIT(name)
+
+#  define SCADA_CORE_IMPORT_NS(version, name)
+
+#endif
+
+#endif

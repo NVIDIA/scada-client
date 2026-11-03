@@ -1,0 +1,49 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS___UTILS_VERSION
+#define GDAKIS___UTILS_VERSION
+
+#if !defined(GDAKIS_UTILS_VERSION)
+#  define GDAKIS_UTILS_VERSION 2
+#endif
+
+#if !defined(__DOXYGEN__)
+
+#  define ___GDAKIS_UTILS_CONCAT(a, b) a##b
+#  define __GDAKIS_UTILS_CONCAT(a, b) ___GDAKIS_UTILS_CONCAT(a, b)
+
+#  define GDAKIS_UTILS_NS(version) namespace gdakis::utils::version
+
+#  define GDAKIS_UTILS_SIMPLE_NS namespace gdakis::utils
+
+#  define GDAKIS_UTILS_UNIT(name) inline namespace __GDAKIS_UTILS_CONCAT(___, name)
+
+#  define GDAKIS_UTILS_IMPORT_NS(target, version, name)                                                                \
+      namespace gdakis::utils::target {                                                                                \
+      using namespace ::gdakis::utils::version::__GDAKIS_UTILS_CONCAT(___, name);                                      \
+      }
+
+#  define GDAKIS_UTILS_SIMPLE_EXPORT_NS(root, name)                                                                    \
+      namespace root {                                                                                                 \
+      using namespace ::gdakis::utils::__GDAKIS_UTILS_CONCAT(___, name);                                               \
+      }
+
+#  define GDAKIS_UTILS_EXPORT_NS(root, version, name)                                                                  \
+      namespace root {                                                                                                 \
+      using namespace ::gdakis::utils::version::__GDAKIS_UTILS_CONCAT(___, name);                                      \
+      }
+
+#else
+
+#  define GDAKIS_UTILS_NS(version) namespace gdakis::utils::version
+
+#  define GDAKIS_UTILS_UNIT(name)
+
+#  define GDAKIS_UTILS_IMPORT_NS(version, name)
+
+#endif
+
+#endif

@@ -1,0 +1,49 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS___ADSC_VERSION
+#define GDAKIS___ADSC_VERSION
+
+#if !defined(GDAKIS_ADSC_VERSION)
+#  define GDAKIS_ADSC_VERSION 1
+#endif
+
+#if !defined(__DOXYGEN__)
+
+#  define ___GDAKIS_ADSC_CONCAT(a, b) a##b
+#  define __GDAKIS_ADSC_CONCAT(a, b) ___GDAKIS_ADSC_CONCAT(a, b)
+
+#  define GDAKIS_ADSC_NS(version) namespace gdakis::adsc::version
+
+#  define GDAKIS_ADSC_SIMPLE_NS namespace gdakis::adsc
+
+#  define GDAKIS_ADSC_UNIT(name) inline namespace __GDAKIS_ADSC_CONCAT(___, name)
+
+#  define GDAKIS_ADSC_IMPORT_NS(target, version, name)                                                                 \
+      namespace gdakis::adsc::target {                                                                                 \
+      using namespace ::gdakis::adsc::version::__GDAKIS_ADSC_CONCAT(___, name);                                        \
+      }
+
+#  define GDAKIS_ADSC_EXPORT_NS(root, version, name)                                                                   \
+      namespace root {                                                                                                 \
+      using namespace ::gdakis::adsc::version::__GDAKIS_ADSC_CONCAT(___, name);                                        \
+      }
+
+#  define GDAKIS_ADSC_SIMPLE_EXPORT_NS(root, name)                                                                     \
+      namespace root {                                                                                                 \
+      using namespace ::gdakis::adsc::__GDAKIS_ADSC_CONCAT(___, name);                                                 \
+      }
+
+#else
+
+#  define GDAKIS_ADSC_NS(version) namespace gdakis::adsc::version
+
+#  define GDAKIS_ADSC_UNIT(name)
+
+#  define GDAKIS_ADSC_IMPORT_NS(version, name)
+
+#endif
+
+#endif

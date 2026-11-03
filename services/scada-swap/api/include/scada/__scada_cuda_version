@@ -1,0 +1,37 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA___CUDA_VERSION
+#define SCADA___CUDA_VERSION
+
+#if !defined(SCADA_CUDA_VERSION)
+#  define SCADA_CUDA_VERSION 1
+#endif
+
+#if !defined(__DOXYGEN__)
+
+#  define ___SCADA_CUDA_CONCAT(a, b) a##b
+#  define __SCADA_CUDA_CONCAT(a, b) ___SCADA_CUDA_CONCAT(a, b)
+
+#  define SCADA_CUDA_NS(version) namespace scada::cuda::version
+
+#  define SCADA_CUDA_SIMPLE_NS namespace scada::cuda
+
+#  define SCADA_CUDA_UNIT(name) inline namespace __SCADA_CUDA_CONCAT(___, name)
+
+#  define SCADA_CUDA_EXPORT_SIMPLE_NS(root, name)                                                                      \
+      namespace root {                                                                                                 \
+      using namespace ::scada::cuda::__SCADA_CUDA_CONCAT(___, name);                                                   \
+      }
+
+#else
+
+#  define SCADA_CUDA_SIMPLE_NS namespace scada::cuda
+
+#  define SCADA_CUDA_UNIT(name)
+
+#endif
+
+#endif

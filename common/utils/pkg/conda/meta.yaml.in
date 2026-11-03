@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{% set deps = load_file_data('deps.json', from_recipe_dir = True) %}
+package:
+    name: "@PROJECT_NAME@"
+    version : "@PROJECT_VERSION@"
+
+source:
+    git_rev: "main"
+    git_url: "https://github.com/NVIDIA/scada-client.git"
+
+requirements:
+    build:
+        - cmake
+    run:
+        - {{ compiler('cxx') }}
+        - psa-result {{ deps['psa-result'] if 'psa-result' in deps }} 
+        - gdakis-umem {{ deps['gdakis-umem'] if 'gdakis-umem' in deps }}

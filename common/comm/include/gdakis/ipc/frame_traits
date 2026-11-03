@@ -1,0 +1,32 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_FRAME_TRAITS
+#define GDAKIS_IPC_FRAME_TRAITS
+
+#include <gdakis/ipc/protocol>
+
+#include <type_traits>
+
+namespace gdakis::comm::ipc {
+
+template<operation _Op, typename _Backend>
+struct frame_traits {
+    using message_type = message<_Op, _Backend>;
+    using ancillary_type = typename message_type::ancillary_type;
+
+    // The numeric ancillary member remains in the frame; SCM_RIGHTS carries
+    // the authoritative descriptors. Keep the existing wire representation.
+    static constexpr std::size_t frame_size = sizeof(message_type);
+    //! \hideinitializer
+    static constexpr std::size_t fd_count = [] {
+        if constexpr (std::is_empty_v<ancillary_type>)
+            return std::size_t { 0 };
+        else
+            return ancillary_type {}.size();
+    }();
+};
+
+}
+#endif

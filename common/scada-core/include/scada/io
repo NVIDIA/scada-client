@@ -1,0 +1,26 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_IO
+#define SCADA_IO
+
+#include <scada/__core_version>
+#include <scada/types>
+
+#include <psa/coaio/scheduler/epoll>
+#include <psa/coaio/socket>
+
+SCADA_CORE_SIMPLE_NS {
+SCADA_CORE_UNIT(io) {
+namespace io {
+
+using scheduler = psa::coaio::scheduler::epoll;
+using socket = psa::coaio::socket<scheduler>;
+
+}}}
+
+SCADA_CORE_EXPORT_SIMPLE_NS(scada, io)
+
+#endif

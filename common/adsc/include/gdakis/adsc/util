@@ -1,0 +1,33 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_ADSC_UTIL
+#define GDAKIS_ADSC_UTIL
+
+#include <gdakis/adsc/__adsc_cuda_compat>
+#include <gdakis/adsc/__adsc_version>
+#if defined(__CUDACC__)
+#  include <cooperative_groups.h>
+#endif
+
+GDAKIS_ADSC_SIMPLE_NS {
+GDAKIS_ADSC_UNIT(util) {
+
+template<typename _Fn, typename _Group>
+__host__ __device__ auto single_thread(const _Group & group_, _Fn && fn);
+
+template<typename _Fn, typename _Group>
+__host__ __device__ auto single_thread_broadcast(const _Group & group_, _Fn && fn);
+
+#if defined(__CUDACC__)
+template<typename _Tp, typename _Group>
+__device__ void group_memcpy(const _Group &, _Tp *, const _Tp *, const size_t);
+#endif
+
+}}
+
+#include "impl/util"
+
+#endif

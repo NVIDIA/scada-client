@@ -1,0 +1,41 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS___COMM_LOG
+#define GDAKIS___COMM_LOG
+
+#include <iostream>
+#include <sstream>
+
+#define COMM_LOGNAME "comm"
+
+#ifndef LOCSTR
+#  define LINESTR_IMPL(x) #x
+#  define LINESTR(x) LINESTR_IMPL(x)
+#  define LOCSTR __FILE__ ":" LINESTR(__LINE__)
+#endif
+
+class CommLog {
+public:
+    template<typename... Args>
+    static void Error(Args... args) {
+        Log(args...);
+    }
+
+    // main writer method
+    template<typename... Args>
+    static void Log(Args... args) {
+        std::ostringstream oss;
+        ((oss << args << ' '), ...);
+        std::cout << oss.str() << std::endl;
+    }
+};
+
+#define COMM_LOG(Args, ...)                                                                                            \
+    do {                                                                                                               \
+        CommLog::Error(Args, ##__VA_ARGS__);                                                                           \
+    } while (0);
+
+#endif

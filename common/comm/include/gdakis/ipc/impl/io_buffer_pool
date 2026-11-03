@@ -1,0 +1,150 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_IMPL_IO_BUFFER_POOL
+#define GDAKIS_IPC_IMPL_IO_BUFFER_POOL
+
+#include <gdakis/__comm_log>
+#include <iostream>
+namespace gdakis::comm::ipc {
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+template<typename _Allocator>
+inline io_buffer_pool<_Td, _Ts, _Sco>::handle<_Allocator>::handle(
+    unsigned num_blocks, data_ptr && data, status_ptr && status, bool is_dma) noexcept
+    : num_blocks_(num_blocks),
+      is_dma_(is_dma),
+      data_(std::move(data)),
+      status_(std::move(status)) {}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+template<typename _Allocator>
+template<typename _Fn, typename _Gn>
+inline typename io_buffer_pool<_Td, _Ts, _Sco>::template handle<_Allocator>::result_type
+io_buffer_pool<_Td, _Ts, _Sco>::handle<_Allocator>::build(
+    unsigned num_blocks, _Fn && fn, _Gn && gn, bool is_dma) noexcept {
+    auto data = shmem<_Allocator, _Td[]>::alloc_dma(num_blocks, std::forward<_Fn>(fn));
+    if (data == nullptr) {
+        COMM_LOG(LOCSTR, "io buffer pool failed to allocate dma memory for data");
+        return result_type::err(ENOMEM);
+    }
+
+    auto status = shmem<_Allocator, status_type[]>::alloc_dma(num_blocks, std::forward<_Gn>(gn));
+    if (status == nullptr) {
+        COMM_LOG(LOCSTR, "io buffer pool failed to allocate dma memory for status");
+        return result_type::err(ENOMEM);
+    }
+
+    return result_type::ok(handle(num_blocks, std::move(data), std::move(status), is_dma));
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+template<typename _Allocator>
+io_buffer_pool<_Td, _Ts, _Sco> io_buffer_pool<_Td, _Ts, _Sco>::handle<_Allocator>::get() const noexcept {
+    return io_buffer_pool(id_.has_value() ? id_.value() : -1, num_blocks_, data_.get(), status_.get(), is_dma_);
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+template<typename _Allocator>
+inline const std::optional<int> io_buffer_pool<_Td, _Ts, _Sco>::handle<_Allocator>::id() const noexcept {
+    return id_;
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+template<typename _Allocator>
+inline _Td * io_buffer_pool<_Td, _Ts, _Sco>::handle<_Allocator>::data() const noexcept {
+    return data_.get();
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+template<typename _Allocator>
+inline psa::result<typename io_buffer_pool<_Td, _Ts, _Sco>::template handle<_Allocator>::request_type, int>
+io_buffer_pool<_Td, _Ts, _Sco>::handle<_Allocator>::request() const noexcept {
+    auto data_handle = data_.handle();
+    if (data_handle.is_err()) {
+        COMM_LOG(LOCSTR, "io buffer pool registration request failed with the data handle in error");
+        return psa::result<request_type, int>::err(data_handle.err());
+    }
+
+    auto status_handle = status_.handle();
+    if (status_handle.is_err()) {
+        COMM_LOG(LOCSTR, "io buffer pool registration request failed with the data handle in error");
+        return psa::result<request_type, int>::err(status_handle.err());
+    }
+
+    request_type ret;
+    ret.ancillary().set(data_.ancillary(), status_.ancillary());
+    ret.data().req.block_size = sizeof(_Td);
+    ret.data().req.num_blocks = num_blocks_;
+    ret.data().req.is_dma = is_dma_;
+    ret.data().backend.buffer = data_handle.ok();
+    ret.data().backend.status = status_handle.ok();
+
+    return psa::result<request_type, int>::ok(std::move(ret));
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+template<typename _Allocator>
+template<typename _Socket>
+inline auto io_buffer_pool<_Td, _Ts, _Sco>::handle<_Allocator>::send_to_server(_Socket & socket) noexcept {
+    auto msg = request();
+    using result_type = decltype(ipc::send_to_server(socket, msg.ok()).sync());
+    if (msg.is_err()) {
+        COMM_LOG(LOCSTR, "io buffer pool request message in error state");
+        return result_type::err(msg.err());
+    }
+    auto res = ipc::send_to_server(socket, msg.ok()).sync();
+    if (res.is_err()) {
+        COMM_LOG(LOCSTR, "io buffer pool request submission in error state");
+        return res;
+    }
+
+    acknowledge<operation::register_io_buffer_pool, allocator_backend_t<_Allocator>> ack;
+    res = socket.read(ack).sync();
+    if (res.is_err()) {
+        COMM_LOG(LOCSTR, "io buffer pool register_io_buffer_pool response message in error state");
+        return res;
+    }
+    if (ack.status == gdakis::comm::status_type::ok) {
+        id_ = ack.id;
+    } else {
+        COMM_LOG(LOCSTR, "io buffer pool register_io_buffer_pool received non-ok status from server");
+    }
+
+    return ack.status == gdakis::comm::status_type::ok ? result_type::template ok<>()
+                                                       : result_type::err(static_cast<int>(ack.status));
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+io_buffer_pool<_Td, _Ts, _Sco>::io_buffer_pool(
+    int id, unsigned num_blocks, _Td * data, status_type * status, bool is_dma) noexcept
+    : id_(id),
+      num_blocks_(num_blocks),
+      data_(data),
+      status_(status),
+      is_dma_(is_dma) {}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+inline int io_buffer_pool<_Td, _Ts, _Sco>::id() const noexcept {
+    return id_;
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+inline unsigned io_buffer_pool<_Td, _Ts, _Sco>::number_of_blocks() const noexcept {
+    return num_blocks_;
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+inline _Td * io_buffer_pool<_Td, _Ts, _Sco>::data() const noexcept {
+    return data_;
+}
+
+template<typename _Td, typename _Ts, thread_scope _Sco>
+inline typename io_buffer_pool<_Td, _Ts, _Sco>::status_type * io_buffer_pool<_Td, _Ts, _Sco>::status() const noexcept {
+    return status_;
+}
+
+}
+
+#endif

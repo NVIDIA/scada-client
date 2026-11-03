@@ -1,0 +1,118 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_SPINBAR
+#define GDAKIS_SPINBAR
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+#include <gdakis/atomic>
+
+//! @file gdakis/spinbar
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(spinbar) {
+
+//! A spinning barrier
+//! @tparam _Sco Synchronization scope
+template<thread_scope _Sco>
+class spinbar {
+public:
+    //! @brief Type that defines an arrival token that can be used later to wait for the barrier
+    using arrival_token = unsigned;
+
+protected:
+    //! @brief Type for counter variables
+    using counter_type = atomic<unsigned, _Sco>;
+    //! @brief Type for flag variables
+    using flag_type = atomic<bool, thread_scope_system>;
+
+    //! @brief Number of threads expected to arrive to the barrier
+    counter_type expected_;
+
+    //! @brief Number of threads pending to arrive to the barrier on a given epoch
+    counter_type pending_;
+
+    //! @brief Epoch tracking to prevent re-entry into the barrier until all threads clear
+    counter_type phase_;
+
+    //! @brief Whether the barrier has been cancelled
+    flag_type cancelled_;
+
+    //! @brief Deleted copy constructor
+    spinbar(const spinbar &) = delete;
+
+    //! @brief Delete copy assignment operator
+    spinbar & operator=(const spinbar &) = delete;
+
+    //! @brief Arrive to the barrier
+    //! @tparam _Lock Lock guard type to hold while arriving
+    //! @param n Number of threads arriving to the barrier
+    //! @return Arrival token that can be used to wait for the barrier
+    __host__ __device__ arrival_token __arrive(unsigned n) noexcept;
+
+    //! @brief Wait for a barrier using an arrival token returned by a previous arrive operation
+    //! @param token Arrival token
+    //! @return True if the barrier is not cancelled, false otherwise
+    __host__ __device__ bool __wait(arrival_token && token) const noexcept;
+
+    //! @brief Minimum back-off delay in nanoseconds
+    static constexpr unsigned min_backoff_ = 32;
+
+    //! @brief Maximum back-off delay in nanoseconds
+    static constexpr unsigned max_backoff_ = 512;
+
+public:
+    //! @brief Constructor
+    //! @param expected Number of threads expected on the barrier
+    __host__ __device__ spinbar(unsigned expected) noexcept;
+
+    //! @brief Arrive to the barrier
+    //! @param count Number of threads arriving to the barrier
+    //! @returns Arrival token that can be used to wait for the barrier
+    __host__ __device__ arrival_token arrive(unsigned count = 1) noexcept;
+
+    //! @brief Wait on the barrier
+    //! @param token Arrival token returned by the wait operation
+    //! @return True if the barrier has not been cancelled, false otherwise
+    __host__ __device__ bool wait(arrival_token && token) const noexcept;
+
+    //! @brief Check if barrier is cancelled
+    //! @return True if the barrier has not been cancelled, false otherwise
+    __host__ __device__ bool alive() const noexcept;
+
+    //! @brief Arrive to the barrier and wait until it clears
+    //! @return True if the barrier has not been cancelled, false otherwise
+    __host__ __device__ bool arrive_and_wait() noexcept;
+
+    //! @brief Arrive to the barrier and remove the calling thread from the set of expected arrivals
+    //! @return True if the barrier has not been cancelled, false otherwise
+    __host__ __device__ void arrive_and_drop() noexcept;
+
+    //! @brief Cancels the barrier, causing all waiting process to continue
+    //! @tparam _Allocator GDAKIS allocator type used to allocate the barrier
+    //! @tparam Args Cancellation function arguments
+    //! @param ...args Arguments to pass to the function that cancels the barrier
+    //!
+    //! Barrier cancellation depends on the location of the barrier, which is
+    //! the _Allocator template parameter identifies.
+    //! In the case of GPU barriers, this function takes a CUDA stream where
+    //! to submit the barrier cancellation.
+    //!
+    template<typename _Allocator, typename... Args>
+    bool cancel(Args &&... args) noexcept;
+
+    //! @brief Return the maximum number of expected threads supported by the barrier
+    //! @returns Maximum number of threads supported
+    __host__ __device__ static constexpr unsigned max() noexcept;
+};
+
+}}
+
+#include "impl/spinbar"
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, spinbar)
+
+#endif

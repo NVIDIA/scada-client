@@ -1,0 +1,41 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_UUID
+#define SCADA_UUID
+
+#include <scada/__core_version>
+
+#include <array>
+#include <string>
+
+#include <cstdint>
+
+SCADA_CORE_SIMPLE_NS {
+SCADA_CORE_UNIT(uuid) {
+
+class uuid {
+public:
+    using value_type = std::array<std::uint8_t, 16>;
+
+protected:
+    value_type bytes_;
+
+public:
+    uuid(const std::string &) noexcept;
+    uuid(value_type &&) noexcept;
+
+    const value_type & value() const noexcept;
+    std::string to_string() const noexcept;
+
+    bool operator==(const uuid &) const noexcept;
+    bool operator!=(const uuid &) const noexcept;
+};
+
+}}
+
+SCADA_CORE_EXPORT_SIMPLE_NS(scada, uuid)
+
+#endif

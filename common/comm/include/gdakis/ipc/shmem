@@ -1,0 +1,25 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IPC_SHMEM
+#define GDAKIS_IPC_SHMEM
+
+namespace gdakis::comm::ipc {
+
+template<typename _Allocator, typename _Tp>
+class ptr;
+
+template<typename _Allocator, typename _Tp>
+class dma_ptr;
+
+template<typename _Allocator, typename _Tp>
+class shmem;
+
+}
+
+#include "impl/cpu/shmem"
+#include "impl/cuda/shmem"
+
+#endif

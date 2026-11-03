@@ -1,0 +1,83 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_ADSC_IMPL_CL_REFERENCE
+#define GDAKIS_ADSC_IMPL_CL_REFERENCE
+
+GDAKIS_ADSC_SIMPLE_NS {
+GDAKIS_ADSC_UNIT(cl_reference) {
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::cl_reference(
+    const std::size_t offset, cl_id_type & cl_id, val_type * vals, meta_type * meta, set_meta_type * set_meta) noexcept
+    : offset_(offset),
+      cl_id_(cl_id),
+      vals_(vals),
+      meta_(meta),
+      set_meta_(set_meta),
+      flags_(0) {}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ std::size_t
+cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::cl_buffer_offset() const noexcept {
+    return offset_;
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ typename cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::cl_id_type &
+cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::cl_id() noexcept {
+    return cl_id_;
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ typename cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::val_type *
+cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::vals() noexcept {
+    return vals_;
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ void cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::mark_dirty() noexcept {
+    flags_.fetch_or(static_cast<uint32_t>(states::dirty), memory_order_release);
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ void cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::mark_clean() noexcept {
+    flags_.fetch_and(~static_cast<uint32_t>(states::dirty), memory_order_release);
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ bool cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::is_dirty() const noexcept {
+    return static_cast<uint32_t>(states::dirty) & flags_.load(memory_order_acquire);
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ void cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::reset() noexcept {
+    flags_.store(0, memory_order_release);
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+inline __host__ __device__ void cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::invalidate() noexcept {
+    cl_id_ = invalid_cl_id();
+    reset();
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+template<typename __Meta>
+inline __host__
+__device__ std::enable_if_t<!std::is_same_v<__Meta, nullmeta_t> and std::is_same_v<__Meta, _Meta>, __Meta &>
+cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::meta() noexcept {
+    return meta_[0];
+}
+
+template<thread_scope _Sco, typename _Key, typename _Val, std::size_t _CL_Size, typename _Meta, typename _Set_Meta>
+template<typename __Set_Meta>
+inline __host__ __device__
+std::enable_if_t<!std::is_same_v<__Set_Meta, nullsetmeta_t> and std::is_same_v<__Set_Meta, _Set_Meta>, __Set_Meta &>
+cl_reference<_Sco, _Key, _Val, _CL_Size, _Meta, _Set_Meta>::set_meta() noexcept {
+    return set_meta_[0];
+}
+
+}}
+
+#endif

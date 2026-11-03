@@ -1,0 +1,142 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IMPL_AUTOBATCH
+#define GDAKIS_IMPL_AUTOBATCH
+
+#include <gdakis/autobatch>
+
+namespace gdakis::comm {
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers, typename _Fn, std::size_t... _I>
+inline __host__ __device__ typename autobatch<_Tp, _Sco, _NumBuffers>::array_type __build_array(
+    _Fn && fn, std::index_sequence<_I...>) noexcept {
+    return typename autobatch<_Tp, _Sco, _NumBuffers>::array_type { buffer_type(fn(_I))... };
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+inline __host__ __device__ constexpr unsigned autobatch<_Tp, _Sco, _NumBuffers>::number_of_buffers() noexcept {
+    return array_size;
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+template<typename _Fn, std::size_t... _I>
+inline __host__ __device__ typename autobatch<_Tp, _Sco, _NumBuffers>::array_type
+autobatch<_Tp, _Sco, _NumBuffers>::__build_array(_Fn && fn, std::index_sequence<_I...>) noexcept {
+#pragma nv_diag_suppress 20014
+#pragma nv_diag_suppress 20011
+    return array_type { buffer_type(fn(_I))... };
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+template<typename _Fn>
+inline __host__ __device__ autobatch<_Tp, _Sco, _NumBuffers>::autobatch(_Fn && fn) noexcept
+    : buffers_(__build_array(std::forward<_Fn>(fn), std::make_index_sequence<_NumBuffers> {})),
+      current_buffer_(0) {
+    static_assert(_NumBuffers > 0, "NumBuffers must be greater than 0, we don't support a single buffer for autobatch");
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+__host__ __device__ inline unsigned autobatch<_Tp, _Sco, _NumBuffers>::next_buffer_index(
+    unsigned current) const noexcept {
+    return (current + 1) % array_size;
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+__host__ __device__ inline typename autobatch<_Tp, _Sco, _NumBuffers>::entry_token
+autobatch<_Tp, _Sco, _NumBuffers>::enter() noexcept {
+    entry_token token;
+
+    // Start with the current buffer
+    auto start_buffer = current_buffer_;
+    token.buffer_idx = start_buffer;
+    unsigned attempts = 0;
+
+    // Try all buffers until we succeed
+    do {
+        if (buffers_[token.buffer_idx].try_enter(token.position, token.epoch)) {
+            return token;
+        }
+
+        // Try the next buffer
+        token.buffer_idx = next_buffer_index(token.buffer_idx);
+
+        // If we've tried all buffers, sleep and restart
+        if (token.buffer_idx == start_buffer) {
+            this_thread::nanosleep(attempts * 10);
+            attempts++;
+        }
+    } while (true); // Keep trying until we succeed
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+__host__ __device__ inline void autobatch<_Tp, _Sco, _NumBuffers>::exit(const entry_token & token) noexcept {
+    buffers_[token.buffer_idx].exit(token.epoch);
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+template<typename Arg>
+__host__ __device__ inline void autobatch<_Tp, _Sco, _NumBuffers>::push(Arg && arg) noexcept {
+    auto token = enter();
+    buffers_[token.buffer_idx].set(token.position, std::forward<Arg>(arg));
+    exit(token);
+}
+
+#if defined(__CUDA_ARCH__)
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+template<typename _Cg, typename _Arg>
+__device__ inline void autobatch<_Tp, _Sco, _NumBuffers>::push(const _Cg & group, _Arg && arg) noexcept {
+    auto token = enter_group(group);
+    buffers_[token.buffer_idx].set(token.position, std::forward<_Arg>(arg));
+    group.sync();
+    exit_group(group, token);
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+template<typename _Cg>
+inline __device__ typename autobatch<_Tp, _Sco, _NumBuffers>::entry_token
+autobatch<_Tp, _Sco, _NumBuffers>::enter_group(const _Cg & group) noexcept {
+    entry_token token;
+
+    auto start_buffer = cooperative_groups::invoke_one_broadcast(group, [this] { return current_buffer_; });
+    token.buffer_idx = start_buffer;
+    unsigned attempts = 0;
+
+    // Try all buffers until we succeed
+    do {
+        if (buffers_[token.buffer_idx].try_enter_group(group, token.position, token.epoch)) {
+            // update current buffer
+            current_buffer_ = token.buffer_idx;
+            return token;
+        }
+
+        // Try the next buffer
+        token.buffer_idx = next_buffer_index(token.buffer_idx);
+
+        // If we've tried all buffers, sleep and restart
+        if (token.buffer_idx == start_buffer) {
+            this_thread::nanosleep(attempts * 10);
+            attempts++;
+        }
+    } while (true); // Keep trying until we succeed
+}
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+template<typename _Cg>
+inline __device__ void autobatch<_Tp, _Sco, _NumBuffers>::exit_group(
+    const _Cg & group, const entry_token & token) noexcept {
+    buffers_[token.buffer_idx].exit_group(group, token.epoch);
+}
+
+#endif
+
+template<typename _Tp, thread_scope _Sco, size_t _NumBuffers>
+template<typename Arg>
+__host__ __device__ inline void autobatch<_Tp, _Sco, _NumBuffers>::set(const entry_token & token, Arg && arg) noexcept {
+    buffers_[token.buffer_idx].set(token.position, std::forward<Arg>(arg));
+}
+
+}
+
+#endif

@@ -1,0 +1,159 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_IMPL_RESULT
+#define PSA_IMPL_RESULT
+
+#include <utility>
+#include <variant>
+namespace psa {
+
+// result<_Ok, _Err>
+
+//template<typename _Ok, typename _Err>
+//inline constexpr
+//result<_Ok, _Err>::result(variant_type && value) noexcept :
+//    result_(std::move(value))
+//{
+//    static_assert(std::is_move_constructible_v<_Ok>, "Ok type is not move constructible");
+//    static_assert(std::is_move_constructible_v<_Err>, "Err type is not move constructible");
+//}
+
+template<typename _Ok, typename _Err>
+template<typename... Args>
+inline constexpr result<_Ok, _Err>::result(cuda::std::in_place_t, Args &&... args) noexcept
+    : result_(cuda::std::in_place, std::forward<Args>(args)...) {}
+
+template<typename _Ok, typename _Err>
+template<typename... Args>
+inline constexpr result<_Ok, _Err>::result(cuda::std::unexpect_t, Args &&... args) noexcept
+    : result_(cuda::std::unexpect, std::forward<Args>(args)...) {}
+
+#pragma nv_exec_check_disable
+template<typename _Ok, typename _Err>
+template<typename... Args>
+inline constexpr result<_Ok, _Err> result<_Ok, _Err>::ok(Args &&... args) noexcept {
+    return result(cuda::std::in_place, std::forward<Args>(args)...);
+}
+
+#pragma nv_exec_check_disable
+template<typename _Ok, typename _Err>
+template<typename... Args>
+inline constexpr result<_Ok, _Err> result<_Ok, _Err>::err(Args &&... args) noexcept {
+    return result(cuda::std::unexpect, std::forward<Args>(args)...);
+}
+
+template<typename _Ok, typename _Err>
+__host__ __device__ inline typename result<_Ok, _Err>::sync_type result<_Ok, _Err>::sync() noexcept {
+    return result(std::move(*this));
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr bool result<_Ok, _Err>::is_ok() const noexcept {
+    return result_.has_value();
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr bool result<_Ok, _Err>::is_err() const noexcept {
+    return result_.has_value() == false;
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr const _Ok & result<_Ok, _Err>::ok() const {
+#if !defined(__CUDA_ARCH__)
+    if (result_.has_value() == false)
+        throw std::bad_variant_access();
+#endif
+    return result_.value();
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr _Ok & result<_Ok, _Err>::ok() {
+#if !defined(__CUDA_ARCH__)
+    if (result_.has_value() == false)
+        throw std::bad_variant_access();
+#endif
+    return result_.value();
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr _Ok && result<_Ok, _Err>::take_ok() {
+#if !defined(__CUDA_ARCH__)
+    if (result_.has_value() == false)
+        throw std::bad_variant_access();
+#endif
+    return std::move(result_.value());
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr const _Err & result<_Ok, _Err>::err() const {
+#if !defined(__CUDA_ARCH__)
+    if (result_.has_value())
+        throw std::bad_variant_access();
+#endif
+    return result_.error();
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr _Err & result<_Ok, _Err>::err() {
+#if !defined(__CUDA_ARCH__)
+    if (result_.has_value())
+        throw std::bad_variant_access();
+#endif
+    return result_.error();
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr _Err && result<_Ok, _Err>::take_err() {
+#if !defined(__CUDA_ARCH__)
+    if (result_.has_value())
+        throw std::bad_variant_access();
+#endif
+    return std::move(result_.error());
+}
+
+template<typename _Ok, typename _Err>
+inline constexpr result<_Ok, _Err> & result<_Ok, _Err>::operator=(result && other) noexcept {
+    result_ = std::move(other.result_);
+    return *this;
+}
+
+#pragma nv_exec_check_disable
+template<typename _Ok, typename _Err>
+template<typename _Fn>
+inline constexpr result<std::invoke_result_t<_Fn, _Ok>, _Err> result<_Ok, _Err>::map(_Fn && op) noexcept {
+    using ok_type = std::invoke_result_t<_Fn, _Ok>;
+    return result_.has_value() == false ? result<ok_type, _Err>::err(take_err())
+                                        : result<ok_type, _Err>::ok(op(take_ok()));
+}
+
+#pragma nv_exec_check_disable
+template<typename _Ok, typename _Err>
+template<typename _Fn>
+inline constexpr result<_Ok, std::invoke_result_t<_Fn, _Err>> result<_Ok, _Err>::map_err(_Fn && op) noexcept {
+    using err_type = std::invoke_result_t<_Fn, _Err>;
+    return result_.has_value() ? result<_Ok, err_type>::ok(take_ok()) : result<_Ok, err_type>::err(op(take_err()));
+}
+
+#pragma nv_exec_check_disable
+template<typename _Ok, typename _Err>
+template<typename _Fn, typename... Args>
+inline constexpr typename result<_Ok, _Err>::template require_same_err_t<_Fn> result<_Ok, _Err>::and_then(
+    _Fn && op, Args &&... args) noexcept {
+    return result_.has_value() ? op(take_ok()) : require_same_err_t<_Fn>::err(std::forward<Args>(args)..., take_err());
+}
+
+#pragma nv_exec_check_disable
+template<typename _Ok, typename _Err>
+template<typename _Fn, typename... Args>
+inline constexpr typename result<_Ok, _Err>::template require_same_ok_t<_Fn> result<_Ok, _Err>::or_else(
+    _Fn && op, Args &&... args) noexcept {
+    return result_.has_value() == false ? op(take_err())
+                                        : require_same_ok_t<_Fn>::ok(std::forward<Args>(args)..., take_ok());
+}
+
+}
+
+#endif

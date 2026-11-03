@@ -1,0 +1,381 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IMPL_BITMAP
+#define GDAKIS_IMPL_BITMAP
+
+#include <cassert>
+#include <gdakis/bits>
+
+#if defined(__CUDACC__)
+#  include <cooperative_groups.h>
+#  include <cooperative_groups/reduce.h>
+#endif
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(bitmap) {
+
+// embedded_bitmap
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+__host__ __device__ inline constexpr std::size_t embedded_bitmap<_Tp, _Sco, _Void>::word_count(
+    std::size_t length) noexcept {
+    return ((length + bits_per_word - 1) / bits_per_word);
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+__host__ __device__ inline constexpr std::size_t embedded_bitmap<_Tp, _Sco, _Void>::memory_size(
+    std::size_t length) noexcept {
+    return word_count(length) * sizeof(_Tp);
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+inline __host__ __device__ bool embedded_bitmap<_Tp, _Sco, _Void>::set(
+    type data, std::size_t pos, memory_order mem_order) noexcept {
+    std::size_t word = pos / bits_per_word;
+    std::size_t bit = pos % bits_per_word;
+    _Tp or_mask = static_cast<_Tp>(1) << bit;
+    atomic<_Tp, _Sco> * atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+    _Tp old_value = atom->fetch_or(or_mask, mem_order);
+    return (old_value & or_mask) == 0;
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+inline __host__ __device__ std::size_t embedded_bitmap<_Tp, _Sco, _Void>::set(
+    type data, std::size_t start, std::size_t size, memory_order mem_order) noexcept {
+    if (size == 1)
+        return set(data, start, mem_order);
+
+    std::size_t word = start / bits_per_word;
+    std::size_t bit = start % bits_per_word;
+
+    /* First word as special case since bit might be different from zero */
+    std::size_t first = bit;
+    std::size_t last = (bits_per_word - first) > size ? first + size : bits_per_word;
+
+    _Tp or_mask = last == bits_per_word ? static_cast<_Tp>(-1) : (static_cast<_Tp>(1) << last) - 1;
+    or_mask &= ~((static_cast<_Tp>(1) << first) - 1);
+
+    atomic<_Tp, _Sco> * atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+    _Tp old_value = atom->fetch_or(or_mask, mem_order);
+    std::size_t ret = popc(old_value & or_mask);
+
+    size -= (last - first);
+
+    while (size > 0) {
+        word += 1;
+        last = size >= bits_per_word ? bits_per_word : size;
+        assert(last == bits_per_word or last == size);
+        or_mask = last == bits_per_word ? static_cast<_Tp>(-1) : (static_cast<_Tp>(1) << last) - 1;
+
+        atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+        _Tp old_value = atom->fetch_or(or_mask, mem_order);
+        ret += popc(old_value & or_mask);
+        assert(size >= last);
+
+        size -= last;
+    }
+    return ret;
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+inline __host__ __device__ std::size_t embedded_bitmap<_Tp, _Sco, _Void>::rset(
+    type data, std::size_t pos, std::size_t size, memory_order mem_order) noexcept {
+    if (size == 1)
+        return set(data, pos, mem_order);
+
+    std::size_t word = (pos + size - 1) / bits_per_word;
+    std::size_t bit = (pos + size - 1) % bits_per_word;
+
+    std::size_t first_word = pos / bits_per_word;
+    std::size_t first_bit = pos % bits_per_word;
+
+    std::size_t mask_shift = word == first_word ? bit - first_bit + 1 : bit + 1;
+    std::size_t shift = word == first_word ? first_bit : 0;
+
+    std::size_t pending = size - mask_shift;
+    _Tp or_mask = (mask_shift == bits_per_word) ? static_cast<_Tp>(-1) : (static_cast<_Tp>(1) << mask_shift) - 1;
+    or_mask <<= shift;
+    atomic<_Tp, _Sco> * atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+    _Tp old_value = atom->fetch_or(or_mask, mem_order);
+    std::size_t ret = popc(old_value & or_mask);
+
+    while (pending) {
+        word = word - 1;
+        bit = bits_per_word - 1;
+
+        mask_shift = word == first_word ? bit - first_bit + 1 : bit + 1;
+        shift = word == first_word ? first_bit : 0;
+
+        pending -= mask_shift;
+        or_mask = (mask_shift == bits_per_word) ? static_cast<_Tp>(-1) : (static_cast<_Tp>(1) << mask_shift) - 1;
+        or_mask <<= shift;
+
+        atom--;
+
+        old_value = atom->fetch_or(or_mask, mem_order);
+        ret += popc(old_value & or_mask);
+        assert(pending > 0 or word == first_word);
+    }
+    return ret;
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+inline __host__ __device__ bool embedded_bitmap<_Tp, _Sco, _Void>::clear(
+    type data, std::size_t pos, memory_order mem_order) noexcept {
+    std::size_t word = pos / bits_per_word;
+    std::size_t bit = pos % bits_per_word;
+    _Tp and_mask = static_cast<_Tp>(1) << bit;
+    atomic<_Tp, _Sco> * atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+    _Tp old_value = atom->fetch_and(~and_mask, mem_order);
+    return (old_value & and_mask) == and_mask ? 1 : 0;
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+inline __host__ __device__ std::size_t embedded_bitmap<_Tp, _Sco, _Void>::clear(
+    type data, std::size_t start, std::size_t size, memory_order mem_order) noexcept {
+    std::size_t word = start / bits_per_word;
+    std::size_t bit = start % bits_per_word;
+
+    /* First word as special case since bit might be different from zero */
+    std::size_t first = bit;
+    std::size_t last = (bits_per_word - first) > size ? first + size : bits_per_word;
+
+    _Tp mask = last == bits_per_word ? static_cast<_Tp>(-1) : (static_cast<_Tp>(1) << last) - 1;
+    mask &= ~((static_cast<_Tp>(1) << first) - 1);
+
+    atomic<_Tp, _Sco> * atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+    _Tp old_value = atom->fetch_and(~mask, mem_order);
+    std::size_t ret = popc(old_value & mask);
+
+    size -= (last - first);
+
+    while (size > 0) {
+        word += 1;
+        last = size >= bits_per_word ? bits_per_word : size;
+        assert(last == bits_per_word or last == size);
+        mask = last == bits_per_word ? static_cast<_Tp>(-1) : (static_cast<_Tp>(1) << last) - 1;
+
+        atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+        _Tp old_value = atom->fetch_and(~mask, mem_order);
+        ret += popc(old_value & mask);
+        assert(size >= last);
+
+        size -= last;
+    }
+    return ret;
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+inline __host__ __device__ bool embedded_bitmap<_Tp, _Sco, _Void>::check(
+    type data, std::size_t pos, memory_order mem_order) noexcept {
+    std::size_t word = pos / bits_per_word;
+    std::size_t bit = pos % bits_per_word;
+    _Tp or_mask = static_cast<_Tp>(1) << bit;
+    atomic<_Tp, _Sco> * atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+    _Tp current_value = atom->load(mem_order);
+    return (current_value & or_mask) == or_mask;
+}
+
+template<typename _Tp, thread_scope _Sco, typename _Void>
+inline __host__ __device__ bool embedded_bitmap<_Tp, _Sco, _Void>::check(
+    type data, std::size_t pos, std::size_t size, memory_order mem_order) noexcept {
+    std::size_t word = pos / bits_per_word;
+    std::size_t bit = pos % bits_per_word;
+
+    std::size_t pending = size;
+    std::size_t mask_size = bits_per_word - bit;
+    if (mask_size > size)
+        mask_size = size;
+
+    pending -= mask_size;
+    _Tp or_mask = mask_size == bits_per_word ? static_cast<_Tp>(-1) : ((static_cast<_Tp>(1) << mask_size) - 1);
+    or_mask = or_mask << bit;
+    atomic<_Tp, _Sco> * atom = reinterpret_cast<atomic<_Tp, _Sco> *>(data + word);
+    _Tp current_value = atom->load(mem_order);
+    if ((current_value & or_mask) != or_mask)
+        return false;
+
+    while (pending) {
+        mask_size = pending < bits_per_word ? pending : bits_per_word;
+        pending -= mask_size;
+        or_mask = mask_size == bits_per_word ? static_cast<_Tp>(-1) : ((static_cast<_Tp>(1) << mask_size) - 1);
+        atom++;
+        current_value = atom->load(mem_order);
+        if ((current_value & or_mask) != or_mask)
+            return false;
+    }
+
+    return true;
+}
+
+// atomic_bitmap
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ atomic_bitmap<_Tp, _Sco>::atomic_bitmap() noexcept : value_(static_cast<_Tp>(0)) {}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ _Tp atomic_bitmap<_Tp, _Sco>::get(memory_order order) const noexcept {
+    return value_.load(order);
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ bool atomic_bitmap<_Tp, _Sco>::get(size_t n, memory_order order) const noexcept {
+    assert(n < MAX_);
+    _Tp value = value_.load(order);
+    _Tp mask = static_cast<_Tp>(1) << n;
+    _Tp ret = value & mask;
+    return ret != static_cast<_Tp>(0);
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ bool atomic_bitmap<_Tp, _Sco>::set(size_t n, memory_order order) noexcept {
+    assert(n < MAX_);
+    _Tp mask = static_cast<_Tp>(1) << n;
+    return (value_.fetch_or(mask, order) & mask) == static_cast<_Tp>(0);
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ bool atomic_bitmap<_Tp, _Sco>::clear(size_t n, memory_order order) noexcept {
+    assert(n < MAX_);
+    _Tp mask = static_cast<_Tp>(1) << n;
+    return (value_.fetch_and(~mask, order) & mask) == mask;
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ size_t atomic_bitmap<_Tp, _Sco>::count(memory_order order) const noexcept {
+    _Tp value = value_.load(order);
+    return popc(value);
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ ssize_t atomic_bitmap<_Tp, _Sco>::find_first_set(memory_order order) const noexcept {
+    _Tp value = value_.load(order);
+    return ffs(value);
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ ssize_t atomic_bitmap<_Tp, _Sco>::find_previous(
+    size_t n, memory_order order) const noexcept {
+    _Tp value = value_.load(order);
+    _Tp mask = (static_cast<_Tp>(1) << n) - 1;
+    return fls(value & mask);
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ ssize_t atomic_bitmap<_Tp, _Sco>::find_next(size_t n, memory_order order) const noexcept {
+    _Tp value = value_.load(order);
+    _Tp mask = ~((static_cast<_Tp>(1) << n) - 1);
+    return ffs(value & mask);
+}
+
+template<typename _Tp, thread_scope _Sco>
+inline __host__ __device__ ssize_t atomic_bitmap<_Tp, _Sco>::alloc() noexcept {
+    _Tp value = value_.load(memory_order_acquire);
+    ssize_t ret = ffs(~value) - 1;
+
+    while (ret >= 0) {
+        value = set(ret, memory_order_release);
+        if ((value & (static_cast<_Tp>(1) << ret)) == 0)
+            return ret;
+        ret = ffs(~value) - 1;
+    }
+    return ret;
+}
+
+#if defined(__CUDACC__)
+
+template<typename _Tp, thread_scope _Sco>
+template<typename _Cg>
+inline __device__ bool atomic_bitmap<_Tp, _Sco>::set(const _Cg & g, size_t n, memory_order order) noexcept {
+    if (g.num_threads() == 1)
+        return set(n, order);
+
+    auto conflict_group = cooperative_groups::labeled_partition(g, n);
+    bool ret = conflict_group.thread_rank() == 0;
+    auto leader_group = cooperative_groups::labeled_partition(g, ret);
+
+    if (ret) {
+        auto mask
+            = cooperative_groups::reduce(leader_group, static_cast<_Tp>(1) << n, cooperative_groups::bit_or<_Tp>());
+        _Tp old = cooperative_groups::invoke_one_broadcast(
+            leader_group, [this, mask, order] { return value_.fetch_or(mask, order); });
+        ret = (old & static_cast<_Tp>(1) << n) == static_cast<_Tp>(0);
+    }
+    g.sync();
+    return ret;
+}
+
+template<typename _Tp, thread_scope _Sco>
+template<typename _Cg>
+inline __device__ ssize_t atomic_bitmap<_Tp, _Sco>::alloc(const _Cg & g) noexcept {
+    unsigned local_id = g.thread_rank();
+    _Tp value = value_.load(memory_order_acquire);
+    unsigned available = popc(~value);
+
+    auto alloc_group = cooperative_groups::labeled_partition(g, available > local_id);
+
+    while (available > local_id) {
+        _Tp mask = cooperative_groups::invoke_one_broadcast(alloc_group, [this, value, &alloc_group] {
+            _Tp mask = static_cast<_Tp>(0);
+            for (size_t n = 0; n < alloc_group.num_threads(); ++n) {
+                ssize_t pos = ffs(~(value | mask)) - 1;
+                if (pos < 0)
+                    break;
+                mask |= (static_cast<_Tp>(1) << pos);
+            }
+            if (mask == 0)
+                return static_cast<_Tp>(0);
+            _Tp current = value_.fetch_or(mask, memory_order_release);
+            return mask & ~current;
+        });
+
+        unsigned allocated = popc(mask);
+        auto pending_group = cooperative_groups::labeled_partition(alloc_group, local_id >= allocated);
+        if (allocated > local_id) {
+            _Tp used = ~static_cast<_Tp>(0);
+            ssize_t pos = ffs(mask & used) - 1;
+            for (size_t n = 0; n < alloc_group.thread_rank(); ++n) {
+                assert(pos >= 0);
+                used &= ~(static_cast<_Tp>(1) << pos);
+                pos = ffs(mask & used) - 1;
+            }
+            return pos;
+        }
+        local_id = pending_group.thread_rank();
+        // Workaround for thread_group assignment error
+        ::memcpy(&alloc_group, &pending_group, sizeof(cooperative_groups::thread_group));
+        value = value_.load(memory_order_acquire);
+        available = popc(~value);
+    }
+    return -1;
+}
+
+template<typename _Tp, thread_scope _Sco>
+template<typename _Cg>
+inline __device__ bool atomic_bitmap<_Tp, _Sco>::clear(const _Cg & g, size_t n, memory_order order) noexcept {
+    if (g.num_threads() == 1)
+        return clear(n, order);
+
+    auto conflict_group = cooperative_groups::labeled_partition(g, n);
+    bool ret = conflict_group.thread_rank() == 0;
+    auto leader_group = cooperative_groups::labeled_partition(g, ret);
+
+    if (ret) {
+        _Tp mask
+            = cooperative_groups::reduce(leader_group, static_cast<_Tp>(1) << n, cooperative_groups::bit_or<_Tp>());
+        _Tp old = cooperative_groups::invoke_one_broadcast(
+            leader_group, [this, mask, order] { return value_.fetch_and(~mask, order); });
+        ret = (old & static_cast<_Tp>(1) << n) == (static_cast<_Tp>(1) << n);
+    }
+    g.sync();
+    return ret;
+}
+
+#endif
+
+}}
+
+#endif
