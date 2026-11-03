@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check distribution
+        run: python3 ci/check_distribution.py
+      - name: Check CMake helpers
+        run: python3 -m unittest discover -s cmake/tests -p 'test_*.py'
+
+  # Opt-in, maintainer-triggered job; never schedules fork PR code on a private runner.
+  cuda-build:
+    if: github.event_name == 'workflow_dispatch' && vars.SCADA_CLIENT_CUDA_CI_ENABLED == 'true'
+    runs-on: [self-hosted, linux, scada-client-cuda]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build static/shared clients and installed consumers
+        run: bash ci/check-client.sh

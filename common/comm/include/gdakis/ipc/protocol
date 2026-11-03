@@ -1,0 +1,91 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IPC_PROTOCOL
+#define GDAKIS_IPC_PROTOCOL
+
+#include <gdakis/mpbar>
+#include <gdakis/protocol>
+#include <gdakis/spinbar>
+
+//! @file gdakis/ipc/protocol
+
+namespace gdakis::comm::ipc {
+
+template<device_type _Device>
+struct request_buffer_control;
+
+//! @brief Sends a message to a server using a UNIX domain socket
+//! @tparam _Socket UNIX domain socket type
+//! @tparam _Message Message type
+//! @param socket UNIX domain socket to send the message through
+//! @param message Message to send
+//! @returns Return value of the UNIX domain socket send function
+template<typename _Socket, typename _Message>
+static inline auto send_to_server(_Socket & socket, const _Message & message) noexcept;
+
+}
+
+#include <gdakis/ipc/cpu/protocol>
+#include <gdakis/umem/cpu>
+
+#if __has_include(<cuda.h>)
+#  include <gdakis/ipc/cuda/protocol>
+#  include <gdakis/umem/cuda>
+#endif
+
+namespace gdakis::comm::ipc {
+
+//! @brief Helper class to obtain the GDAKIS device from a GDAKIS allocator
+template<typename>
+struct allocator_backend;
+
+//! @brief Helper class to obtain the per-device backend from a GDAKIS device
+template<device_type>
+struct device_backend;
+
+template<>
+struct allocator_backend<umem::cpu> {
+    using type = ipc::cpu::backend_type;
+};
+
+template<>
+struct device_backend<device_type::cpu> {
+    using type = cpu::backend_type;
+    using request_buffer_control_type = request_buffer_control<device_type::cpu>;
+};
+
+#if __has_include(<cuda.h>)
+template<>
+struct allocator_backend<umem::cuda> {
+    using type = ipc::cuda::backend_type;
+};
+
+template<>
+struct device_backend<device_type::cuda> {
+    using type = cuda::backend_type;
+    using request_buffer_control_type = request_buffer_control<device_type::cuda>;
+};
+
+#endif
+
+//! @brief Alias to access the allocator backend type
+template<typename _Allocator>
+using allocator_backend_t = typename allocator_backend<_Allocator>::type;
+
+//! @brief Alias to access the device backend type
+template<device_type _Device>
+using device_backend_t = typename device_backend<_Device>::type;
+}
+
+template<>
+struct gdakis::comm::transport_backend<gdakis::comm::transport_type::ipc> {
+    template<device_type _Device>
+    using type = ipc::device_backend<_Device>;
+};
+
+#include "impl/protocol"
+
+#endif

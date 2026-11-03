@@ -1,0 +1,122 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_CONTEXT
+#define GDAKIS_CUDA_CONTEXT
+
+#include <gdakis/__utils_version>
+
+#include <cerrno>
+#include <string>
+
+#include <psa/result>
+
+#if __has_include(<cuda.h>) && __has_include(<cuda_runtime_api.h>)
+#  include <cuda.h>
+#  include <cuda_runtime_api.h>
+#  define GDAKIS_CUDA_CONTEXT_ENABLED
+#endif
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(context) {
+
+#if defined(GDAKIS_CUDA_CONTEXT_ENABLED)
+
+inline std::string format_driver_error(CUresult status) {
+    const char * error_name = nullptr;
+    const char * error_string = nullptr;
+    (void)cuGetErrorName(status, &error_name);
+    (void)cuGetErrorString(status, &error_string);
+
+    std::string message = std::to_string(static_cast<int>(status));
+    if (error_name != nullptr) {
+        message += " (";
+        message += error_name;
+        if (error_string != nullptr) {
+            message += ": ";
+            message += error_string;
+        }
+        message += ')';
+    } else if (error_string != nullptr) {
+        message += " (";
+        message += error_string;
+        message += ')';
+    }
+
+    return message;
+}
+
+inline int driver_error_to_errno(CUresult status) noexcept {
+    switch (status) {
+    case CUDA_ERROR_OUT_OF_MEMORY:
+        return ENOMEM;
+    case CUDA_ERROR_NO_DEVICE:
+    case CUDA_ERROR_INVALID_DEVICE:
+        return ENODEV;
+    case CUDA_ERROR_NOT_SUPPORTED:
+        return ENOTSUP;
+    default:
+        return EIO;
+    }
+}
+
+inline int runtime_error_to_errno(cudaError_t status) noexcept {
+    switch (status) {
+    case cudaSuccess:
+        return 0;
+    case cudaErrorMemoryAllocation:
+        return ENOMEM;
+    case cudaErrorNoDevice:
+    case cudaErrorInvalidDevice:
+        return ENODEV;
+    case cudaErrorNotSupported:
+        return ENOTSUP;
+    case cudaErrorInsufficientDriver:
+        return ENOSYS;
+    default:
+        return EIO;
+    }
+}
+
+inline psa::result<int, int> ensure_runtime_context_current() noexcept {
+    int device = 0;
+    auto runtime_status = cudaGetDevice(&device);
+    if (runtime_status != cudaSuccess) {
+        return psa::result<int, int>::err(runtime_error_to_errno(runtime_status));
+    }
+
+    // Force Runtime API lazy initialization before mixing in Driver API calls.
+    runtime_status = cudaFree(0);
+    if (runtime_status != cudaSuccess) {
+        return psa::result<int, int>::err(runtime_error_to_errno(runtime_status));
+    }
+
+    CUcontext current_context = nullptr;
+    auto driver_status = cuCtxGetCurrent(&current_context);
+    if (driver_status != CUDA_SUCCESS) {
+        return psa::result<int, int>::err(driver_error_to_errno(driver_status));
+    }
+    if (current_context == nullptr) {
+        return psa::result<int, int>::err(EIO);
+    }
+
+    return psa::result<int, int>::ok(device);
+}
+
+#else
+
+inline psa::result<int, int> ensure_runtime_context_current() noexcept {
+    return psa::result<int, int>::err(ENOSYS);
+}
+
+#endif
+
+}}
+
+namespace gdakis::cuda {
+using namespace ::gdakis::utils::cuda::___context;
+}
+
+#endif

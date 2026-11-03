@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+pkgname='psa-coaio-dev'
+pkgdesc='Asynchronous I/O using C++ coroutines'
+arch=('x86_64')
+pkgver=1.0.0
+pkgrel=1
+
+source=('git+https://github.com/NVIDIA/scada-client.git')
+sha256sums=('SKIP')
+
+prepare() {
+    cmake -B build -S scada-client/common/coaio \
+    -DCOAIO_BUILD_TESTS=BOOL:ON \
+    -DCOAIO_BUILD_DOCS=BOOL:ON \
+    -DCMAKE_BUILD_TYPE='Release' \
+    -DCMAKE_INSTALL_PREFIX='/usr'
+}
+
+build() {
+   cmake --build build -j`nproc`
+}
+
+check() {
+    ctest --test-dir build --output-on-failure
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+}

@@ -1,0 +1,736 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_IMPL_CUDA_SHMEM
+#define GDAKIS_IPC_IMPL_CUDA_SHMEM
+
+#if __has_include(<cuda_runtime_api.h>)
+#  include <cuda.h>
+#  include <cuda_runtime.h>
+#  include <cuda_runtime_api.h>
+#  include <gdakis/__comm_log>
+#  include <gdakis/cuda/context>
+
+#  include <gdakis/none>
+#  include <gdakis/umem/cuda>
+#  include <psa/result>
+
+//! @file gdakis/ipc/impl/cuda/shmem
+namespace gdakis::comm::ipc {
+
+inline void checkCudaResult(CUresult result, const char * func, const char * file, int line) {
+    if (result != CUDA_SUCCESS) {
+        const char * errorName;
+        const char * errorDescription;
+        cuGetErrorName(result, &errorName);
+        cuGetErrorString(result, &errorDescription);
+        COMM_LOG("CUDA error in function: ", func, " at file: ", file, " line: ", line, " Error: ", errorName,
+            " Description: ", errorDescription);
+    }
+}
+
+inline void checkCudaError(cudaError_t error, const char * func, const char * file, int line) {
+    if (error != cudaSuccess) {
+        const char * errorName;
+        const char * errorDescription;
+        cuGetErrorName(static_cast<CUresult>(error), &errorName);
+        cuGetErrorString(static_cast<CUresult>(error), &errorDescription);
+        COMM_LOG("CUDA error in function: ", func, " at file: ", file, " line: ", line, " Error: ", errorName,
+            " Description: ", errorDescription);
+    }
+}
+
+// Macro to wrap CUDA calls for error checking
+#  define CHECK_CUDA_RESULT(val) checkCudaResult((val), #val, __FILE__, __LINE__)
+#  define CHECK_CUDA_ERROR(error) checkCudaError((error), #error, __FILE__, __LINE__)
+
+namespace {
+
+inline psa::result<int, int> require_cuda_ipc_device(const char * operation_name) noexcept {
+    auto ready = gdakis::cuda::ensure_runtime_context_current();
+    if (ready.is_err()) {
+        COMM_LOG(operation_name, " failed to prepare CUDA runtime/context (err = ", ready.err(), ")");
+    }
+    return ready;
+}
+
+} // namespace
+
+//! @brief Type to store CUDA IPC shared memory pointers
+//! @tparam _Tp Object type for the pointer
+template<typename _Tp>
+class ptr<umem::cuda, _Tp> {
+public:
+    //! @brief CUDA IPC Shared memory uses CUDA IPC handles
+    using handle_type = none_type;
+
+    //! @brief CUDA IPC Shared memory does not use ancillary data for import/export
+    using ancillary_type = std::array<int, 1>;
+
+    //! @brief Unique pointer holding the CUDA IPC shared memory mapping
+    using ptr_type = std::unique_ptr<_Tp, std::function<void(_Tp *)>>;
+
+protected:
+    //! @brief CUDA handle associated to the CUDA shared memory object
+    int fd_;
+
+    //! @brief Unique pointer holding the CUDA IPC shared memory allocation
+    ptr_type ptr_;
+
+    //! @brief Constructor
+    //! @param ptr Pointer to the CUDA IPC shared memory
+    //! @param mem_size Size in bytes of the CUDA IPC shared memory
+    ptr(int fd, ptr_type && ptr) noexcept : fd_(fd), ptr_(std::move(ptr)) {}
+
+    //! @brief Allow the CUDA IPC shared memory allocator to create pointers
+    friend class shmem<umem::cuda, _Tp>;
+
+    //! @brief Allow the CUDA IPC shared memory allocator to create pointers
+    friend class shmem<umem::cuda, _Tp[]>;
+
+public:
+    //! @brief Constructor for null allocations
+    inline ptr(std::nullptr_t) noexcept : fd_(-1), ptr_(nullptr) {};
+
+    //! @brief Default move constructor
+    ptr(ptr && other) noexcept : fd_(other.fd_), ptr_(std::move(other.ptr_)) { other.fd_ = -1; }
+
+//! @brief Destructor
+//!
+//! This destructor is explicitly declared to disable execution checks on NVCC
+//!
+#  pragma nv_exec_check_disable
+    ~ptr() noexcept {
+        if (fd_ >= 0)
+            ::close(fd_);
+    }
+
+    //! @brief Get the pointer where the CUDA IPC shared memory is mapped
+    //! @return Pointer to the CUDA IPC shared memory
+    _Tp * get() const noexcept { return ptr_.get(); }
+
+    //! @brief Get the ancillary data required to export the CUDA IPC shared memory
+    //! @return Ancillary data
+    ancillary_type ancillary() const noexcept { return std::array<int, 1> { fd_ }; }
+
+    //! @brief Get the handle required to export the CUDA IPC shared memory
+    //! @return Handle associated to the CPU IPC shared memory, or error if the handle is invalid
+    psa::result<handle_type, int> handle() const noexcept {
+        if (ptr_ == nullptr or fd_ < 0)
+            return psa::result<handle_type, int>::err(ENOMEM);
+        return psa::result<handle_type, int>::ok(none_type());
+    }
+
+    //! @brief Equality comparison operator with nullptr
+    bool operator==(std::nullptr_t) const noexcept { return ptr_ == nullptr; }
+
+    //! @brief Inequality comparison operator with nullptr
+    bool operator!=(std::nullptr_t) const noexcept { return ptr_ != nullptr; }
+};
+
+template<typename _Tp>
+class dma_ptr<umem::cuda, _Tp> : public ptr<umem::cuda, _Tp> {
+protected:
+    //! @brief Base pointer class
+    using base_ptr = ptr<umem::cuda, _Tp>;
+
+public:
+    //! @brief Unique pointer holding the CPU IPC shared memory mapping
+    using ptr_type = typename base_ptr::ptr_type;
+
+    //! @brief CUDA IPC Shared memory does not use ancillary data for import/export
+    using ancillary_type = std::array<int, 2>;
+
+    //! @brief CUDA handle associated to the CUDA dma-buf
+    int dma_fd_;
+
+protected:
+    //! @brief Constructor
+    //! @param fd File descriptor associated to the CPU IPC shared memory
+    //! @param ptr Pointer where the CPU IPC shared memory is mapped
+    //! @param fn Functor to unmap the CPU IPC shared memory upon destruction
+    dma_ptr(int fd, int dma_fd, ptr_type && ptr) noexcept : base_ptr(fd, std::move(ptr)), dma_fd_(dma_fd) {}
+
+    //! @brief Allow the CPU IPC shared memory allocator to create pointers
+    friend class shmem<umem::cuda, _Tp>;
+
+    //! @brief Allow the CPU IPC shared memory allocator to create pointers
+    friend class shmem<umem::cuda, _Tp[]>;
+
+public:
+    //! @brief Constructor for null allocations
+    inline dma_ptr(std::nullptr_t) noexcept : base_ptr(nullptr), dma_fd_(-1) {}
+
+    //! @brief Move onstructor
+    //! @param other Pointer being moved
+    inline dma_ptr(dma_ptr && other) noexcept : base_ptr(std::move(other)), dma_fd_(other.dma_fd_) {
+        other.dma_fd_ = -1;
+    }
+
+    //! @brief Destructor
+    inline ~dma_ptr() noexcept {
+        if (dma_fd_ >= 0)
+            ::close(dma_fd_);
+    }
+
+    //! @brief Get the ancillary data required to export the CUDA IPC shared memory
+    //! @return Ancillary data
+    ancillary_type ancillary() const noexcept { return std::array<int, 2> { base_ptr::fd_, dma_fd_ }; }
+
+    //! @brief Get the DMA buffer associated the CPU IPC shared memory
+    //! @return Associated DMA buffer or an error
+    int dma_buf() const noexcept { return dma_fd_; }
+};
+
+namespace cuda {
+
+class base_shmem {
+protected:
+    //! @brief Checks if the CUDA driver supports DMA buffers
+    //! @param device CUDA device where the DMA should be supported
+    //! @returns True if the CUDA driver supports DMA buffers
+    static inline bool supports_dma_buf_from_driver(int device) noexcept {
+        CUresult cu_ret;
+        CUdevice cu_device;
+        int attr;
+
+        cu_ret = cuDeviceGet(&cu_device, device);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            return false;
+        }
+
+        cu_ret = cuDeviceGetAttribute(&attr, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, cu_device);
+        CHECK_CUDA_RESULT(cu_ret);
+        return (cu_ret == CUDA_SUCCESS) and (attr != 0) ? true : false;
+    }
+
+    //! @brief Returns the memory alignment required for DMA memory
+    //! @param device CUDA device where to get the alignment requirement
+    //! @return Alignment value for DMA memory or error
+    static inline psa::result<std::size_t, int> get_dma_memory_alignment(int device) noexcept {
+        CUresult cu_ret;
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.id = device;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+
+        std::size_t granularity;
+        cu_ret = ::cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+        CHECK_CUDA_RESULT(cu_ret);
+        return cu_ret == CUDA_SUCCESS ? psa::result<std::size_t, int>::ok(granularity)
+                                      : psa::result<std::size_t, int>::err(EIO);
+    }
+
+    //! @brief Returns the minimum memory allocation size for DMA memory
+    //! @param device CUDA device where to get the alignment requirement
+    //! @param size Memory allocation size
+    //! @return Required allocation size for DMA memory or error
+    static inline psa::result<std::size_t, int> get_dma_memory_size(int device, std::size_t size) noexcept {
+        return get_dma_memory_alignment(device).map(
+            [size](std::size_t alignment) { return ((size + alignment - 1) / alignment) * alignment; });
+    }
+};
+
+template<typename _Tp>
+class shmem : public base_shmem {
+protected:
+    //! @brief Pointer type to hold memory allocations
+    using ptr_type = typename ptr<umem::cuda, _Tp>::ptr_type;
+
+    //! @brief CUDA IPC Shared memory uses CUDA IPC handles
+    using handle_type = typename ptr<umem::cuda, _Tp>::handle_type;
+
+    static inline ptr_type map_mem_handle(int device, std::size_t size, CUmemGenericAllocationHandle handle) noexcept {
+        auto alignment = get_dma_memory_alignment(device);
+        if (alignment.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA memory alignment");
+            return nullptr;
+        }
+
+        auto dma_mem_size = get_dma_memory_size(device, size);
+        if (dma_mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA buffer size");
+            return nullptr;
+        }
+        auto mem_size = dma_mem_size.ok();
+
+        CUdeviceptr ptr;
+        CUresult cu_ret;
+        cu_ret = ::cuMemAddressReserve(&ptr, mem_size, alignment.ok(), 0, 0);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            cuMemRelease(handle);
+            return nullptr;
+        }
+
+        cu_ret = ::cuMemMap(ptr, mem_size, 0, handle, 0);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            ::cuMemRelease(handle);
+            ::cuMemAddressFree(ptr, mem_size);
+            return nullptr;
+        }
+
+        CUmemAccessDesc access = {};
+        access.location.id = device;
+        access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        cu_ret = ::cuMemSetAccess(ptr, mem_size, &access, 1);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            ::cuMemUnmap(ptr, mem_size);
+            ::cuMemRelease(handle);
+            ::cuMemAddressFree(ptr, mem_size);
+            return nullptr;
+        }
+
+        return ptr_type(reinterpret_cast<_Tp *>(ptr), [mem_size, handle](_Tp * p) {
+            CUdeviceptr ptr = reinterpret_cast<CUdeviceptr>(p);
+            ::cuMemUnmap(ptr, mem_size);
+            ::cuMemRelease(handle);
+            ::cuMemAddressFree(ptr, mem_size);
+        });
+    }
+
+    //! @brief Allocates DMA capable memory
+    //! @param device CUDA device where to allocate the memory
+    //! @param size Memory size to allocate
+    //! @return Pointer to the allocated memory
+    static inline std::tuple<CUmemGenericAllocationHandle, ptr_type> alloc_dma_memory(
+        int device, std::size_t size) noexcept {
+        CUresult cu_ret;
+        if (supports_dma_buf_from_driver(device) == false) {
+            COMM_LOG(LOCSTR, "DMA buff unsupported");
+            return std::make_tuple<CUmemGenericAllocationHandle, ptr_type>(CUmemGenericAllocationHandle(), nullptr);
+        }
+
+        auto dma_mem_size = get_dma_memory_size(device, size);
+        if (dma_mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA buffer size");
+            return std::make_tuple<CUmemGenericAllocationHandle, ptr_type>(CUmemGenericAllocationHandle(), nullptr);
+        }
+        auto mem_size = dma_mem_size.ok();
+
+        CUmemGenericAllocationHandle handle;
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+        prop.location.id = device;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+
+        cu_ret = ::cuMemCreate(&handle, mem_size, &prop, 0);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            return std::make_tuple<CUmemGenericAllocationHandle, ptr_type>(CUmemGenericAllocationHandle(), nullptr);
+        }
+
+        auto ptr = map_mem_handle(device, mem_size, handle);
+        return std::make_tuple(handle, std::move(ptr));
+    }
+
+    //! @brief Gets an IPC memory handle to the memory
+    //! @param ptr Pointer to the CUDA memory to obtain the IPC handle for
+    //! @param size Size of the allocated memory
+    //! @return IPC memory handle or error
+    static inline int get_ipc_handle(
+        int device, const CUmemGenericAllocationHandle & handle, std::size_t size) noexcept {
+        int fd;
+        auto cu_ret = ::cuMemExportToShareableHandle(&fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            return -1;
+        }
+
+        return fd;
+    }
+
+    //! @brief Gets a DMA buffer for the memory
+    //! @param ptr Pointer to the CUDA memory to obtain the IPC handle for
+    //! @param size Size of the allocated memory
+    //! @return DMA buffer
+    static inline int get_dma_buf(int device, const ptr_type & ptr, std::size_t size) noexcept {
+        int fd;
+
+        auto mem_size = get_dma_memory_size(device, size);
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA buffer size");
+            return -1;
+        }
+
+        CUresult cu_ret;
+        cu_ret = ::cuMemGetHandleForAddressRange(
+            &fd, reinterpret_cast<CUdeviceptr>(ptr.get()), mem_size.ok(), CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            return -1;
+        }
+
+        return fd;
+    }
+
+    //! @brief Imports CUDA memory from an IPC handle
+    //! @param handle CUDA IPC handle to import the memory from
+    //! @return Pointer to the imported memory
+    static inline ptr_type import_ipc_handle(int device, int dma_fd, std::size_t size) noexcept {
+        CUmemGenericAllocationHandle mem_handle;
+        auto cu_ret = ::cuMemImportFromShareableHandle(
+            &mem_handle, reinterpret_cast<void *>(dma_fd), CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+        if (cu_ret != CUDA_SUCCESS) {
+            CHECK_CUDA_RESULT(cu_ret);
+            return nullptr;
+        }
+        return map_mem_handle(device, size, mem_handle);
+    }
+};
+
+}
+
+//! @brief CUDA IPC shared memory helper
+template<>
+class shmem<umem::cuda, void> : public cuda::base_shmem {
+public:
+    static inline bool supports_dma() noexcept {
+        auto device = require_cuda_ipc_device("CUDA IPC supports_dma");
+        if (device.is_err()) {
+            return false;
+        }
+        return supports_dma_buf_from_driver(device.ok());
+    }
+};
+
+//! @brief CUDA IPC shared memory allocator/importer for single objects
+//! @tparam _Tp Object types stored in the shared memory
+template<typename _Tp>
+class shmem<umem::cuda, _Tp> : public cuda::shmem<_Tp> {
+protected:
+    //! @brief Base class
+    using base_shmem = cuda::shmem<_Tp>;
+
+    //! @brief CUDA IPC shared memory pointer
+    using ptr_type = ptr<umem::cuda, _Tp>;
+
+    //! @brief CUDA IPC DMA-capable shared memory pointer
+    using dma_ptr_type = dma_ptr<umem::cuda, _Tp>;
+
+    //! @brief CUDA IPC shared memory handle needed for import/export operations
+    using handle_type = typename ptr_type::handle_type;
+
+#  if defined(__CUDACC__)
+    //! @brief Allocate a single object on CUDA IPC shared memory
+    //! @tparam ...Args Argument types passed to the object constructor
+    //! @param ...args Arguments forwarded to the object constructor
+    //! @return CUDA IPC shared memory containing the allocated object
+    template<typename... Args>
+    static inline std::tuple<int, CUmemGenericAllocationHandle, typename base_shmem::ptr_type> alloc_ipc_ptr(
+        Args &&... args) noexcept {
+        auto device = require_cuda_ipc_device("CUDA IPC single-object allocation");
+        if (device.is_err()) {
+            return std::make_tuple<int, CUmemGenericAllocationHandle, typename base_shmem::ptr_type>(
+                -1, CUmemGenericAllocationHandle(), nullptr);
+        }
+
+        auto ret = base_shmem::alloc_dma_memory(device.ok(), sizeof(_Tp));
+        const auto & ptr = std::get<1>(ret);
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "DMA memory allocation failed");
+            return std::make_tuple<int, CUmemGenericAllocationHandle, typename base_shmem::ptr_type>(
+                -1, CUmemGenericAllocationHandle(), nullptr);
+        }
+        umem::cuda::call_constructor<_Tp>(ptr.get(), std::forward<Args>(args)...);
+        return std::make_tuple(device.ok(), std::get<0>(ret), std::move(std::get<1>(ret)));
+    }
+#  endif
+
+    //! @brief Allow multi-object allocator to use the common import logic
+    friend class shmem<umem::cuda, _Tp[]>;
+
+public:
+#  if defined(__CUDACC__)
+    //! @brief Allocate a single object on CUDA IPC shared memory
+    //! @tparam ...Args Argument types passed to the object constructor
+    //! @param ...args Arguments forwarded to the object constructor
+    //! @return CUDA IPC shared memory containing the allocated object
+    template<typename... Args>
+    static inline ptr_type alloc(Args &&... args) noexcept {
+        auto ret = alloc_ipc_ptr(std::forward<Args>(args)...);
+        auto ptr = std::move(std::get<2>(ret));
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "IPC pointer allocation failed");
+            return nullptr;
+        }
+        int device = std::get<0>(ret);
+        auto mem_size = base_shmem::get_dma_memory_size(device, sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA memory size");
+            return nullptr;
+        }
+
+        auto handle = base_shmem::get_ipc_handle(device, std::get<1>(ret), mem_size.ok());
+        if (handle < 0) {
+            COMM_LOG(LOCSTR, "Error obtaining IPC handle");
+            return nullptr;
+        }
+        return ptr_type(handle, std::move(ptr));
+    }
+
+    //! @brief Allocate a single object on CUDA IPC shared DMA-capable memory
+    //! @tparam ...Args Argument types passed to the object constructor
+    //! @param ...args Arguments forwarded to the object constructor
+    //! @return CUDA IPC shared memory containing the allocated object
+    template<typename... Args>
+    static inline dma_ptr_type alloc_dma(Args &&... args) noexcept {
+        auto ret = alloc_ipc_ptr(std::forward<Args>(args)...);
+        auto ptr = std::move(std::get<1>(ret));
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "IPC pointer allocation failed");
+            return nullptr;
+        }
+        int device = std::get<0>(ret);
+
+        auto mem_size = base_shmem::get_dma_memory_size(device, sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining dma memory size");
+            return nullptr;
+        }
+
+        auto handle = base_shmem::get_ipc_handle(ptr, mem_size.ok());
+        if (handle < 0) {
+            COMM_LOG(LOCSTR, "Error obtaining IPC handle");
+            return nullptr;
+        }
+
+        auto dma_fd = base_shmem::get_dma_buf(ptr, mem_size.ok());
+        if (dma_fd < 0) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA Buffer")
+            return nullptr;
+        }
+
+        return dma_ptr_type(handle, dma_fd, std::move(ptr));
+    }
+#  endif
+
+    //! @brief Imports a CUDA IPC shared memory region containing a single object given a handle and its ancillary data
+    //! @param handle CUDA IPC shared memory handle
+    //! @param ancillary CUDA IPC ancillary data
+    //! @return CUDA IPC shared memory pointer
+    static inline ptr_type import(handle_type &&, const typename ptr_type::ancillary_type & ancillary) noexcept {
+        auto device = require_cuda_ipc_device("CUDA IPC single-object import");
+        if (device.is_err()) {
+            return nullptr;
+        }
+
+        auto mem_size = base_shmem::get_dma_memory_size(device.ok(), sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaning dma memory size");
+            return nullptr;
+        }
+
+        auto ptr = base_shmem::import_ipc_handle(device.ok(), std::get<0>(ancillary), mem_size.ok());
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "Error importing IPC handle");
+            return nullptr;
+        }
+
+        return ptr_type(std::get<0>(ancillary), std::move(ptr));
+    }
+
+    //! @brief Imports a CUDA IPC shared DMA-capable memory region containing a single object given a handle and its ancillary data
+    //! @param handle CUDA IPC shared memory handle
+    //! @param ancillary CUDA IPC ancillary data
+    //! @return CUDA IPC shared memory pointer
+    static inline dma_ptr_type import_dma(
+        handle_type &&, const typename dma_ptr_type::ancillary_type & ancillary) noexcept {
+        auto device = require_cuda_ipc_device("CUDA IPC single-object DMA import");
+        if (device.is_err()) {
+            return nullptr;
+        }
+
+        auto mem_size = base_shmem::get_dma_memory_size(device.ok(), sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaning dma memory size");
+            return nullptr;
+        }
+
+        auto ptr = base_shmem::import_ipc_handle(device.ok(), std::get<0>(ancillary), mem_size.ok());
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "Error importing IPC handle");
+            return nullptr;
+        }
+
+        return dma_ptr_type(std::get<0>(ancillary), std::get<1>(ancillary), std::move(ptr));
+    }
+};
+
+//! @brief CUDA IPC shared memory allocator/importer for multiple objects
+//! @tparam _Tp Object types stored in the shared memory
+template<typename _Tp>
+class shmem<umem::cuda, _Tp[]> : public cuda::shmem<_Tp> {
+protected:
+    //! @brief Base class
+    using base_shmem = cuda::shmem<_Tp>;
+
+    //! @brief CUDA IPC shared memory pointer
+    using ptr_type = ptr<umem::cuda, _Tp>;
+
+    //! @brief CUDA IPC DMA-capable shared memory pointer
+    using dma_ptr_type = dma_ptr<umem::cuda, _Tp>;
+
+    //! @brief CUDA IPC shared memory handle needed for import/export operations
+    using handle_type = typename ptr_type::handle_type;
+
+#  if defined(__CUDACC__)
+    //! @brief Allocates multiple objects in a CUDA IPC shared memory region
+    //! @tparam _Fn Functor type to initialize the allocated objects
+    //! @param n_elems Number of objects to allocate
+    //! @param fn Functor to initialize the allocated objects
+    //! @return CUDA IPC shared memory containing the allocated objects
+    template<typename _Fn>
+    static inline std::tuple<int, CUmemGenericAllocationHandle, typename base_shmem::ptr_type> alloc_ipc_ptr(
+        std::size_t n_elems, _Fn && fn) noexcept {
+        auto device = require_cuda_ipc_device("CUDA IPC array allocation");
+        if (device.is_err()) {
+            return std::make_tuple<int, CUmemGenericAllocationHandle, typename base_shmem::ptr_type>(
+                -1, CUmemGenericAllocationHandle(), nullptr);
+        }
+
+        auto ptr = base_shmem::alloc_dma_memory(device.ok(), n_elems * sizeof(_Tp));
+        if (std::get<1>(ptr) == nullptr) {
+            COMM_LOG(LOCSTR, "Error allocating DMA memory");
+            return std::make_tuple<int, CUmemGenericAllocationHandle, typename base_shmem::ptr_type>(
+                -1, CUmemGenericAllocationHandle(), nullptr);
+        }
+        umem::cuda::call_map(std::get<1>(ptr).get(), n_elems, std::forward<_Fn>(fn));
+
+        return std::make_tuple(device.ok(), std::get<0>(ptr), std::move(std::get<1>(ptr)));
+    }
+#  endif
+
+public:
+#  if defined(__CUDACC__)
+    //! @brief Allocates multiple objects in a CUDA IPC shared memory region
+    //! @tparam _Fn Functor type to initialize the allocated objects
+    //! @param n_elems Number of objects to allocate
+    //! @param fn Functor to initialize the allocated objects
+    //! @return CUDA IPC shared memory containing the allocated objects
+    template<typename _Fn>
+    static inline ptr_type alloc(std::size_t n_elems, _Fn && fn) noexcept {
+        auto ret = alloc_ipc_ptr(n_elems, std::forward<_Fn>(fn));
+        auto ptr = std::move(std::get<2>(ret));
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "IPC pointer allocation failed");
+            return nullptr;
+        }
+        int device = std::get<0>(ret);
+        printf("During alloc number of elems : %u of size : %u each\n", static_cast<unsigned>(n_elems),
+            static_cast<unsigned>(sizeof(_Tp)));
+        auto mem_size = base_shmem::get_dma_memory_size(device, n_elems * sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA memory size");
+            return nullptr;
+        }
+
+        auto handle = base_shmem::get_ipc_handle(device, std::get<1>(ret), mem_size.ok());
+        if (handle < 0) {
+            COMM_LOG(LOCSTR, "Error obtaining IPC handle");
+            return nullptr;
+        }
+
+        return ptr_type(handle, std::move(ptr));
+    }
+
+    //! @brief Allocates multiple objects in a CUDA IPC DMA-capable shared memory region
+    //! @tparam _Fn Functor type to initialize the allocated objects
+    //! @param n_elems Number of objects to allocate
+    //! @param fn Functor to initialize the allocated objects
+    //! @return CUDA IPC shared memory containing the allocated objects
+    template<typename _Fn>
+    static inline dma_ptr_type alloc_dma(std::size_t n_elems, _Fn && fn) noexcept {
+        auto ret = alloc_ipc_ptr(n_elems, std::forward<_Fn>(fn));
+        auto ptr = std::move(std::get<2>(ret));
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "IPC pointer allocation failed");
+            return nullptr;
+        }
+        int device = std::get<0>(ret);
+        auto mem_size = base_shmem::get_dma_memory_size(device, n_elems * sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA memory size");
+            return nullptr;
+        }
+        auto handle = base_shmem::get_ipc_handle(device, std::get<1>(ret), mem_size.ok());
+        if (handle < 0) {
+            COMM_LOG(LOCSTR, "Error obtaining IPC handle");
+            return nullptr;
+        }
+        auto dma_fd = base_shmem::get_dma_buf(device, ptr, mem_size.ok());
+        if (dma_fd < 0) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA Buffer");
+            return nullptr;
+        }
+        return dma_ptr_type(handle, dma_fd, std::move(ptr));
+    }
+#  endif
+
+    //! @brief Imports a CUDA IPC shared memory region containing multiple objects given a handle and its ancillary data
+    //! @param handle CUDA IPC shared memory handle
+    //! @param ancillary CUDA IPC ancillary data
+    //! @param n_elems Number of object to import
+    //! @return CUDA IPC shared memory pointer
+    static inline ptr_type import(
+        handle_type &&, const typename ptr_type::ancillary_type & ancillary, size_t n_elems) noexcept {
+        auto device = require_cuda_ipc_device("CUDA IPC array import");
+        if (device.is_err()) {
+            return nullptr;
+        }
+
+        printf("During import number of elems : %u of size : %u each\n", static_cast<unsigned>(n_elems),
+            static_cast<unsigned>(sizeof(_Tp)));
+        auto mem_size = base_shmem::get_dma_memory_size(device.ok(), n_elems * sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA memory size");
+            return nullptr;
+        }
+
+        auto ptr = base_shmem::import_ipc_handle(device.ok(), std::get<0>(ancillary), mem_size.ok());
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "Error importing IPC Handle");
+            return nullptr;
+        }
+
+        return ptr_type(std::get<0>(ancillary), std::move(ptr));
+    }
+
+    //! @brief Imports a CUDA IPC DMA-capable shared memory region containing multiple objects given a handle and its ancillary data
+    //! @param handle CUDA IPC shared memory handle
+    //! @param ancillary CUDA IPC ancillary data
+    //! @param n_elems Number of object to import
+    //! @return CUDA IPC shared memory pointer
+    static inline dma_ptr_type import_dma(
+        handle_type &&, const typename dma_ptr_type::ancillary_type & ancillary, size_t n_elems) noexcept {
+        auto device = require_cuda_ipc_device("CUDA IPC array DMA import");
+        if (device.is_err()) {
+            return nullptr;
+        }
+
+        auto mem_size = base_shmem::get_dma_memory_size(device.ok(), n_elems * sizeof(_Tp));
+        if (mem_size.is_err()) {
+            COMM_LOG(LOCSTR, "Error obtaining DMA memory size");
+            return nullptr;
+        }
+
+        auto ptr = base_shmem::import_ipc_handle(device.ok(), std::get<0>(ancillary), mem_size.ok());
+        if (ptr == nullptr) {
+            COMM_LOG(LOCSTR, "Error importing IPC Handle");
+            return nullptr;
+        }
+
+        return dma_ptr_type(std::get<0>(ancillary), std::get<1>(ancillary), std::move(ptr));
+    }
+};
+
+}
+
+#endif
+#endif

@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Feature request
+description: Propose new or changed non-security functionality
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete user or operator problem and current limitation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable behavior and affected interfaces.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain workarounds or designs considered.
+  - type: textarea
+    id: impact
+    attributes:
+      label: Security and compatibility impact
+      description: Address privilege, device safety, compatibility, dependencies, and packaging.
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues for equivalent proposals.
+          required: true
+        - label: I agree to follow the Code of Conduct.
+          required: true

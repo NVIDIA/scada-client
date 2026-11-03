@@ -1,0 +1,183 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef TESTS_UTILITY
+#define TESTS_UTILITY
+
+#include <gtest/gtest.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <psa/result>
+
+#include <iostream>
+
+#if defined(__CUDACC__)
+#  include <cstdlib>
+#  include <cuda_runtime_api.h>
+namespace tests {
+
+class CUDATest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        int gpu_count = 0;
+        if (cudaGetDeviceCount(&gpu_count) != cudaSuccess or gpu_count <= 0) {
+            GTEST_SKIP() << "No CUDA capable GPUs present. Skipping GPU tests";
+        }
+    }
+};
+
+struct CudaMemSnapshot {
+    std::size_t free_bytes;
+    std::size_t total_bytes;
+};
+
+static inline bool cuda_mem_log_enabled() {
+    return std::getenv("SCADA_CUDA_MEM_LOG") != nullptr;
+}
+
+static inline CudaMemSnapshot cuda_mem_snapshot(const char * label) {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    auto cuda_ret = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (cuda_ret != cudaSuccess) {
+        EXPECT_EQ(cuda_ret, cudaSuccess);
+        return { 0, 0 };
+    }
+    if (cuda_mem_log_enabled()) {
+        std::cout << "[mem] " << label << " free=" << free_bytes << " total=" << total_bytes << std::endl;
+    }
+    return { free_bytes, total_bytes };
+}
+
+static inline void cuda_mem_log_delta(const char * label, const CudaMemSnapshot & begin, const CudaMemSnapshot & end) {
+    if (!cuda_mem_log_enabled()) {
+        return;
+    }
+    auto delta = static_cast<long long>(end.free_bytes) - static_cast<long long>(begin.free_bytes);
+    std::cout << "[mem] " << label << " delta_free=" << delta << " bytes" << std::endl;
+}
+
+class CudaMemLogScope {
+public:
+    explicit CudaMemLogScope(const char * label) : label_(label), enabled_(cuda_mem_log_enabled()) {
+        if (!enabled_) {
+            return;
+        }
+        begin_ = capture();
+        log_snapshot("begin", begin_);
+    }
+
+    ~CudaMemLogScope() {
+        if (!enabled_) {
+            return;
+        }
+        auto end = capture();
+        log_snapshot("end", end);
+        cuda_mem_log_delta(label_, begin_, end);
+    }
+
+private:
+    static CudaMemSnapshot capture() {
+        std::size_t free_bytes = 0;
+        std::size_t total_bytes = 0;
+        auto cuda_ret = cudaMemGetInfo(&free_bytes, &total_bytes);
+        if (cuda_ret != cudaSuccess) {
+            EXPECT_EQ(cuda_ret, cudaSuccess);
+            return { 0, 0 };
+        }
+        return { free_bytes, total_bytes };
+    }
+
+    void log_snapshot(const char * phase, const CudaMemSnapshot & snapshot) const {
+        if (label_ == nullptr || label_[0] == '\0') {
+            std::cout << "[mem] " << phase << " free=" << snapshot.free_bytes << " total=" << snapshot.total_bytes
+                      << std::endl;
+            return;
+        }
+        std::cout << "[mem] " << label_ << " " << phase << " free=" << snapshot.free_bytes
+                  << " total=" << snapshot.total_bytes << std::endl;
+    }
+
+    const char * label_;
+    bool enabled_;
+    CudaMemSnapshot begin_ { 0, 0 };
+};
+
+}
+#endif
+
+namespace tests {
+struct process_handle {
+    pid_t pid_;
+
+    inline process_handle(pid_t pid) noexcept : pid_(pid) {}
+
+    process_handle(const process_handle &) = delete;
+
+    inline process_handle(process_handle && other) noexcept : pid_(other.pid_) { other.pid_ = -1; }
+
+    inline ~process_handle() noexcept {
+        if (pid_ < 0)
+            return;
+
+        ::kill(pid_, SIGTERM);
+    }
+
+    inline bool wait() const noexcept {
+        int status = 0;
+        int err = ::waitpid(pid_, &status, 0);
+        if (err != pid_)
+            return false;
+        return WEXITSTATUS(status) == EXIT_SUCCESS;
+    }
+
+    inline void kill(int sig) const noexcept { ::kill(pid_, sig); }
+};
+
+template<typename _Fn>
+static inline process_handle process(_Fn && fn) {
+    pid_t pid = fork();
+    if (pid != 0)
+        return process_handle(pid);
+
+    fn();
+    if (::testing::Test::HasFatalFailure()) {
+        ::exit(EXIT_FAILURE);
+    }
+    ::exit(EXIT_SUCCESS);
+}
+
+template<typename _Tp>
+class shmem {
+protected:
+    std::shared_ptr<_Tp> mem_;
+
+    inline shmem(std::shared_ptr<_Tp> && mem) noexcept : mem_(std::move(mem)) {}
+
+public:
+    inline shmem(shmem &&) noexcept = default;
+
+    inline _Tp & get() const noexcept { return *mem_.get(); }
+
+    template<typename... Args>
+    static inline psa::result<shmem, int> make(Args &&... args) noexcept {
+        using result_type = psa::result<shmem, int>;
+
+        _Tp * raw = reinterpret_cast<_Tp *>(
+            ::mmap(0, sizeof(_Tp), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+        if (raw == reinterpret_cast<_Tp *>(MAP_FAILED))
+            return result_type::err(errno);
+
+        new (raw) _Tp(std::forward<Args>(args)...);
+
+        return result_type::ok(shmem(std::shared_ptr<_Tp>(raw, [](_Tp * ptr) { ::munmap(ptr, sizeof(_Tp)); })));
+    }
+};
+
+}
+
+#endif

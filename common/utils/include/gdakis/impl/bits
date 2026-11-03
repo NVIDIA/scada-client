@@ -1,0 +1,177 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IMPL_BITS
+#define GDAKIS_IMPL_BITS
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(bits) {
+
+namespace detail {
+
+template<typename, typename = void>
+struct bitops;
+
+template<typename _Tp>
+struct bitops<_Tp, typename std::enable_if<sizeof(_Tp) == 2>::type> {
+
+    static inline __host__ __device__ unsigned popcount(const _Tp & value) noexcept {
+#if defined(__CUDA_ARCH__)
+        return __popc(value);
+#else
+        return __builtin_popcountl(value);
+#endif
+    }
+
+    static inline __host__ __device__ _Tp bswap(const _Tp & value) noexcept {
+#if defined(__CUDA_ARCH__)
+        return __byte_perm(value, value, 0x01) & 0xffff;
+#else
+        return ((value & 0xff00) >> 8) | ((value & 0x00ff) << 8);
+#endif
+    }
+
+    static inline __host__ __device__ ssize_t ffs(const _Tp & value) {
+        if (value == 0)
+            return -1;
+#if defined(__CUDA_ARCH__)
+        return __ffs(value);
+#else
+        return __builtin_ffsl(value);
+#endif
+    }
+
+    static inline __host__ __device__ ssize_t fls(const _Tp & value) {
+        if (value == 0)
+            return -1;
+#if defined(__CUDA_ARCH__)
+        int tmp;
+        unsigned __value = *(reinterpret_cast<unsigned *>(const_cast<_Tp *>(&value)));
+        asm volatile("bfind.u32 %0, %1;" : "=r"(tmp) : "r"(__value));
+        return 31 - tmp;
+#else
+        return 31 - __builtin_clzl(value);
+#endif
+    }
+};
+
+template<typename _Tp>
+struct bitops<_Tp, typename std::enable_if<sizeof(_Tp) == 4>::type> {
+
+    static inline __host__ __device__ unsigned popcount(const _Tp & value) noexcept {
+#if defined(__CUDA_ARCH__)
+        return __popc(value);
+#else
+        return __builtin_popcountl(value);
+#endif
+    }
+
+    static inline __host__ __device__ _Tp bswap(const _Tp & value) noexcept {
+#if defined(__CUDA_ARCH__)
+        return __byte_perm(value, value, 0x0123);
+#else
+        return ((value & 0xff000000) >> 24) | ((value & 0x00ff0000) >> 8) | ((value & 0x0000ff00) << 8)
+            | ((value & 0x000000ff) << 24);
+#endif
+    }
+
+    static inline __host__ __device__ ssize_t ffs(const _Tp & value) noexcept {
+        if (value == 0)
+            return -1;
+#if defined(__CUDA_ARCH__)
+        return __ffs(value);
+#else
+        return __builtin_ffsl(value);
+#endif
+    }
+
+    static inline __host__ __device__ ssize_t fls(const _Tp & value) noexcept {
+        if (value == 0)
+            return -1;
+#if defined(__CUDA_ARCH__)
+        int tmp;
+        unsigned __value = *(reinterpret_cast<unsigned *>(const_cast<_Tp *>(&value)));
+        asm volatile("bfind.u32 %0, %1;" : "=r"(tmp) : "r"(__value));
+        return 31 - tmp;
+#else
+        return 32 - __builtin_clz(value);
+#endif
+    }
+};
+
+template<typename _Tp>
+struct bitops<_Tp, typename std::enable_if<sizeof(_Tp) == 8>::type> {
+    static inline __host__ __device__ unsigned popcount(const _Tp & value) noexcept {
+#if defined(__CUDA_ARCH__)
+        return __popc(value);
+#else
+        return __builtin_popcountll(value);
+#endif
+    }
+
+    static inline __host__ __device__ _Tp bswap(const _Tp & value) noexcept {
+#if defined(__CUDA_ARCH__)
+        unsigned int lo, hi;
+        asm("mov.b64 {%0, %1}, %2;" : "=r"(lo), "=r"(hi) : "l"(value));
+        lo = __byte_perm(lo, lo, 0x0123);
+        hi = __byte_perm(hi, hi, 0x0123);
+        return (static_cast<_Tp>(lo) << 32) | hi;
+#else
+        return ((value << 56) & 0xff00000000000000UL) | ((value << 40) & 0x00ff000000000000UL)
+            | ((value << 24) & 0x0000ff0000000000UL) | ((value << 8) & 0x000000ff00000000UL)
+            | ((value >> 8) & 0x00000000ff000000UL) | ((value >> 24) & 0x0000000000ff0000UL)
+            | ((value >> 40) & 0x000000000000ff00UL) | ((value >> 56) & 0x00000000000000ffUL);
+#endif
+    }
+
+    static inline __host__ __device__ ssize_t ffs(const _Tp & value) noexcept {
+        if (value == 0)
+            return -1;
+#if defined(__CUDA_ARCH__)
+        return __ffsll(value);
+#else
+        return __builtin_ffsll(value);
+#endif
+    }
+
+    static inline __host__ __device__ ssize_t fls(const _Tp & value) noexcept {
+        if (value == 0)
+            return -1;
+#if defined(__CUDA_ARCH__)
+        int tmp;
+        unsigned long long __value = *(reinterpret_cast<unsigned long long *>(const_cast<_Tp *>(&value)));
+        asm volatile("bfind.u64 %0, %1;" : "=r"(tmp) : "l"(__value));
+        return 63 - tmp;
+#else
+        return 64 - __builtin_clzl(value);
+#endif
+    }
+};
+
+}
+
+template<typename _Tp>
+__host__ __device__ unsigned popc(const _Tp & value) noexcept {
+    return detail::bitops<_Tp>::popcount(value);
+}
+
+template<typename _Tp>
+__host__ __device__ _Tp bswap(const _Tp & value) noexcept {
+    return detail::bitops<_Tp>::bswap(value);
+}
+
+template<typename _Tp>
+__host__ __device__ ssize_t ffs(const _Tp & value) noexcept {
+    return detail::bitops<_Tp>::ffs(value);
+}
+
+template<typename _Tp>
+__host__ __device__ ssize_t fls(const _Tp & value) noexcept {
+    return detail::bitops<_Tp>::fls(value);
+}
+
+}}
+
+#endif

@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+BasedOnStyle: WebKit
+Language: Cpp
+# SCADA contains both C++17 and C++20/CUDA sources. Parse the newest syntax
+# understood by the pinned formatter without changing compiler requirements.
+Standard: Latest
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# CUDA annotations and qualifiers that clang-format must parse as attributes.
+AttributeMacros:
+  - '__align__'
+  - '__device__'
+  - '__forceinline__'
+  - '__global__'
+  - '__host__'
+  - '__launch_bounds__'
+  - '__shared__'
+StatementMacros: ['__pragma']
+
+# Pseudo-expansions are used only by clang-format's parser. They teach it that
+# the public versioning macros denote namespaces without expanding real code.
+Macros:
+  - 'GDAKIS_ADSC_NS(version)=namespace gdakis::adsc::version'
+  - 'GDAKIS_ADSC_SIMPLE_NS=namespace gdakis::adsc'
+  - 'GDAKIS_ADSC_UNIT(name)=inline namespace name'
+  - 'GDAKIS_ADSC_IMPORT_NS(target, version, name)=namespace gdakis::adsc::target { using namespace gdakis::adsc::version::name; }'
+  - 'GDAKIS_ADSC_EXPORT_NS(root, version, name)=namespace root { using namespace gdakis::adsc::version::name; }'
+  - 'GDAKIS_ADSC_SIMPLE_EXPORT_NS(root, name)=namespace root { using namespace gdakis::adsc::name; }'
+  - 'GDAKIS_UNVME_NS(version)=namespace gdakis::unvme::version'
+  - 'GDAKIS_UNVME_SIMPLE_NS=namespace gdakis::unvme'
+  - 'GDAKIS_UNVME_UNIT(name)=inline namespace name'
+  - 'GDAKIS_UNVME_IMPORT_NS(target, version, name)=namespace gdakis::unvme::target { using namespace gdakis::unvme::version::name; }'
+  - 'GDAKIS_UNVME_EXPORT_NS(root, version, name)=namespace root { using namespace gdakis::unvme::version::name; }'
+  - 'GDAKIS_UNVME_SIMPLE_EXPORT_NS(root, name)=namespace root { using namespace gdakis::unvme::name; }'
+  - 'GDAKIS_UTILS_NS(version)=namespace gdakis::utils::version'
+  - 'GDAKIS_UTILS_SIMPLE_NS=namespace gdakis::utils'
+  - 'GDAKIS_UTILS_UNIT(name)=inline namespace name'
+  - 'GDAKIS_UTILS_IMPORT_NS(target, version, name)=namespace gdakis::utils::target { using namespace gdakis::utils::version::name; }'
+  - 'GDAKIS_UTILS_EXPORT_NS(root, version, name)=namespace root { using namespace gdakis::utils::version::name; }'
+  - 'GDAKIS_UTILS_SIMPLE_EXPORT_NS(root, name)=namespace root { using namespace gdakis::utils::name; }'
+  - 'SCADA_CORE_NS(version)=namespace scada::core::version'
+  - 'SCADA_CORE_SIMPLE_NS=namespace scada::core'
+  - 'SCADA_CORE_UNIT(name)=inline namespace name'
+  - 'SCADA_CORE_EXPORT_SIMPLE_NS(root, name)=namespace root { using namespace scada::core::name; }'
+  - 'SCADA_CUDA_NS(version)=namespace scada::cuda::version'
+  - 'SCADA_CUDA_SIMPLE_NS=namespace scada::cuda'
+  - 'SCADA_CUDA_UNIT(name)=inline namespace name'
+  - 'SCADA_CUDA_EXPORT_SIMPLE_NS(root, name)=namespace root { using namespace scada::cuda::name; }'
+  - 'SCADA_SWAP_SIMPLE_NS=namespace scada::swap'
+  - 'SCADA_SWAP_UNIT(name)=inline namespace name'
+  - 'SCADA_SWAP_EXPORT_SIMPLE_NS(root, name)=namespace root { using namespace scada::swap::name; }'
+  - 'SCADA_THRUST_SIMPLE_NS=namespace scada::thrust'
+  - 'SCADA_THRUST_UNIT(name)=inline namespace name'
+  - 'SCADA_THRUST_EXPORT_SIMPLE_NS(root, name)=namespace root { using namespace scada::thrust::name; }'
+
+DerivePointerAlignment: false
+PointerAlignment: Middle
+ReferenceAlignment: Pointer
+AlignConsecutiveAssignments:
+  Enabled: false
+  AcrossEmptyLines: false
+  AcrossComments: false
+AlignConsecutiveDeclarations:
+  Enabled: false
+  AcrossEmptyLines: false
+  AcrossComments: false
+SpaceAfterTemplateKeyword: false
+BreakTemplateDeclarations: Yes
+BreakBeforeBraces: Attach
+BreakBeforeBinaryOperators: All
+SpaceBeforeParens: ControlStatements
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortEnumsOnASingleLine: false
+SpaceInEmptyBlock: false
+ReflowComments: false
+
+# namespace foo { namespace bar { ... }} — keep on one line, no body indentation
+CompactNamespaces: true
+NamespaceIndentation: None
+
+BreakConstructorInitializers: BeforeColon
+PackConstructorInitializers: CurrentLine
+
+# Break return types only when line length and penalties require it.
+BreakAfterReturnType: Automatic
+
+# Make nested preprocessor conditionals visible without moving the '#'.
+IndentPPDirectives: AfterHash
+PPIndentWidth: 2
+
+# Sort includes alphabetically within each blank-line-separated block.
+# IncludeBlocks: Preserve keeps groups intact — only order within a group changes.
+# Any reorder that breaks compilation indicates a header that isn't self-contained
+# and should be fixed by adding the missing include to that header directly.
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve

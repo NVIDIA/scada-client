@@ -1,0 +1,168 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_WARP
+#define GDAKIS_CUDA_WARP
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+
+//! @file gdakis/cuda/warp
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(warp) {
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+//! @brief Type that represents the current CUDA warp
+struct this_warp {
+
+    //! @brief Number of threads in a CUDA warp
+    static constexpr unsigned size = 32;
+
+    //! @brief Block the calling thread until all threads within the active thread mask reach the synchronization point
+    //! @param active_mask Mask of threads in the warp to synchronize with
+    __device__ static inline void sync(unsigned active_mask) noexcept;
+
+    //! @brief Get the lane ID of the leader thread within the active thread mask
+    //! @param active_mask Mask of threads in the warp to select a leader from
+    //! @return Lane ID of the leader thread
+    __device__ static inline unsigned leader(unsigned active_mask) noexcept;
+
+    //! @brief Select a thread within the active mask to execute a functor and broadcast its return value to the threads within the active thread mask
+    //! @tparam _Fn Functor type to execute
+    //! @tparam Args Type of the arguments to pass to the functor
+    //! @param active_mask Mask of thread in the warp participating in this operation
+    //! @param fn Functor to execute
+    //! @param ...args Arguments to forward to the functor
+    //! @return Return value of the functor
+    template<typename _Fn, typename... Args>
+    __device__ static inline std::invoke_result_t<_Fn, Args...> single_thread(
+        unsigned active_mask, _Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Broadcast value from one thread to other threads within the active thread mask
+    //! @tparam _Tp Type of the value to broadcast
+    //! @param active_mask Mask of threads participating in the operation
+    //! @param value Value to broadcast
+    //! @param source Lane ID of the thread broadcasting the value
+    //! @return Value received from the source thread
+    template<typename _Tp>
+    __device__ static inline _Tp shuffle(unsigned active_mask, const _Tp & value, int source) noexcept;
+
+    //! @brief Exchange a value across threads within the active thread mask whose lane IDs are computed using a XOR operation
+    //! @tparam _Tp Type of the value to broadcast
+    //! @param active_mask Mask of threads participating in the operation
+    //! @param value Value to exchange
+    //! @param source Value to XOR the lane ID with to obtain the lane ID of the source thread to get the value from
+    //! @return Value received from the source thread
+    template<typename _Tp>
+    __device__ static inline _Tp shuffle_xor(unsigned active_mask, const _Tp & value, int source) noexcept;
+
+    //! @brief Read a value from a thread within the active thread mask whose lane ID is computed using a subtraction operation
+    //! @tparam _Tp Type of the value to read
+    //! @param active_mask Mask of threads participating in the operation
+    //! @param value Value to exchange
+    //! @param source Value to subtract to the lane ID to obtain the the source thread to get the value from
+    //! @return Value received from the source thread
+    template<typename _Tp>
+    __device__ static inline _Tp shuffle_up(unsigned active_mask, const _Tp & value, int source) noexcept;
+
+    //! @brief Compute the mask of threads calling the function passing the same value
+    //! @tparam _Tp Type of the value to compare
+    //! @param active_mask Mask of threads participating in the operation
+    //! @param value Value to compare
+    //! @return Mask of threads within the active thread mask whose value matches
+    template<typename _Tp>
+    __device__ static inline unsigned match(unsigned active_mask, const _Tp & value) noexcept;
+
+    //! @brief Compute the mask of threads whose predicate matches
+    //! @param active_mask Mask of threads participating in the operation
+    //! @param value Value to compare
+    //! @return Mask of threads within the active thread mask whose value matches
+    __device__ static inline unsigned ballot(unsigned active_mask, bool value) noexcept;
+
+#  if !defined(__DOXYGEN__)
+    // Doxygen does not like functor types as templates parameters, so we have
+    // to skip the documentation generation for this two methods
+
+    //! @brief Perform a reduce operation over the threads in the active thread mask
+    //! @tparam _Tp Type of the value to reduce
+    //! @tparam _Op Type of the functor defining the reduce operation
+    //! @param active_mask Mask of threads participating in the operation
+    //! @param value Value to reduce
+    //! @return Result of the reduce operation
+    template<typename _Tp, _Tp(_Op)(const _Tp &, const _Tp &)>
+    __device__ static inline _Tp reduce(unsigned active_mask, const _Tp & value) noexcept;
+
+    //! @brief Perform a scan operation over the threads in the active thread mask
+    //! @tparam _Tp Type of the value to scan
+    //! @tparam _Op Type of the functor defining the scan operation
+    //! @param active_mask Mask of threads participating in the operation
+    //! @param value Value to scan
+    //! @return Result of the scan operation
+    template<typename _Tp, _Tp(_Op)(const _Tp &, const _Tp &)>
+    __device__ static inline _Tp scan(unsigned active_mask, const _Tp & value) noexcept;
+
+#  endif
+};
+
+//! @brief Type that implement operations to use in reduce and scan operations
+struct op {
+    //! @brief Compute the maximum of two values
+    //! @tparam _Tp Type of the values
+    //! @param a First value
+    //! @param b Second value
+    //! @return Maximum of the input values
+    template<typename _Tp>
+    __device__ static inline _Tp max(const _Tp & a, const _Tp & b) noexcept;
+
+    //! @brief Compute the minimum of two values
+    //! @tparam _Tp Type of the values
+    //! @param a First value
+    //! @param b Second value
+    //! @return Minimum of the input values
+    template<typename _Tp>
+    __device__ static inline _Tp min(const _Tp & a, const _Tp & b) noexcept;
+
+    //! @brief Compute the addition of two values
+    //! @tparam _Tp Type of the values
+    //! @param a First value
+    //! @param b Second value
+    //! @return Addition of the input values
+    template<typename _Tp>
+    __device__ static inline _Tp add(const _Tp & a, const _Tp & b) noexcept;
+
+    //! @brief Compute the subtraction of two values
+    //! @tparam _Tp Type of the values
+    //! @param a First value
+    //! @param b Second value
+    //! @return Subtraction of the input values
+    template<typename _Tp>
+    __device__ static inline _Tp sub(const _Tp & a, const _Tp & b) noexcept;
+
+    //! @brief Compute the bitwise AND of two values
+    //! @tparam _Tp Type of the values
+    //! @param a First value
+    //! @param b Second value
+    //! @return Bitwise AND of the input values
+    template<typename _Tp>
+    __device__ static inline _Tp and_(const _Tp & a, const _Tp & b) noexcept;
+
+    //! @brief Compute the bitwise OR of two values
+    //! @tparam _Tp Type of the values
+    //! @param a First value
+    //! @param b Second value
+    //! @return Bitwise OR of the input values
+    template<typename _Tp>
+    __device__ static inline _Tp or_(const _Tp & a, const _Tp & b) noexcept;
+};
+
+#endif
+
+}}
+
+#include "impl/warp"
+
+#endif

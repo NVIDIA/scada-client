@@ -1,0 +1,122 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IMPL_SPINBAR
+#define GDAKIS_IMPL_SPINBAR
+
+#include <gdakis/thread>
+#include <gdakis/umem/cpu>
+#include <gdakis/umem/cuda>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(spinbar) {
+
+template<thread_scope _Sco>
+__host__ __device__ inline spinbar<_Sco>::spinbar(unsigned expected) noexcept
+    : expected_(expected),
+      pending_(expected),
+      phase_(0),
+      cancelled_(false) {}
+
+template<thread_scope _Sco>
+__host__ __device__ inline typename spinbar<_Sco>::arrival_token spinbar<_Sco>::__arrive(unsigned n) noexcept {
+    auto token = (phase_.load(memory_order_acquire) + 1) & 0x1;
+    auto old = pending_.fetch_sub(n, memory_order_release);
+    if (old == n) {
+        // The last arrival acquires the release sequence formed by all previous arrivals before publishing the next
+        // phase. Keeping the acquire conditional avoids strengthening the RMW on every participant.
+        atomic_thread_fence(memory_order_acquire, _Sco);
+        pending_.store(expected_.load(memory_order_acquire), memory_order_relaxed);
+        phase_.fetch_add(1, memory_order_release);
+    }
+    return token;
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline bool spinbar<_Sco>::__wait(arrival_token && token) const noexcept {
+    unsigned delay = min_backoff_;
+    while (token != (phase_.load(memory_order_acquire) & 0x1)) {
+        if (cancelled_.load(memory_order_relaxed))
+            return false;
+        this_thread::nanosleep(delay);
+        delay = delay << 1;
+        if (delay > max_backoff_)
+            delay = min_backoff_;
+    }
+    return alive();
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline bool spinbar<_Sco>::alive() const noexcept {
+
+    return cancelled_.load(memory_order_acquire) == false;
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline typename spinbar<_Sco>::arrival_token spinbar<_Sco>::arrive(unsigned n) noexcept {
+    return __arrive(n);
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline bool spinbar<_Sco>::wait(arrival_token && token) const noexcept {
+    return __wait(std::move(token));
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline bool spinbar<_Sco>::arrive_and_wait() noexcept {
+    auto token = arrive();
+    return wait(std::move(token));
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline void spinbar<_Sco>::arrive_and_drop() noexcept {
+    expected_.fetch_sub(1, memory_order_release);
+    arrive();
+}
+
+namespace detail {
+
+template<typename>
+struct __spinbar_cancel;
+
+template<>
+struct __spinbar_cancel<umem::cpu> {
+    inline bool operator()(atomic<bool, thread_scope_system> & flag) const noexcept {
+        flag.store(true, memory_order_release);
+        return true;
+    }
+};
+
+#if __has_include(<cuda_runtime_api.h>)
+template<>
+struct __spinbar_cancel<umem::cuda> {
+    inline bool operator()(atomic<bool, thread_scope_system> & flag, cudaStream_t cuda_stream = 0) const noexcept {
+        cudaError_t cuda_ret;
+        bool cancelled = true;
+        cuda_ret = cudaMemcpyAsync(&flag, &cancelled, sizeof(cancelled), cudaMemcpyHostToDevice, cuda_stream);
+        if (cuda_ret != cudaSuccess)
+            return false;
+        cuda_ret = cudaStreamSynchronize(cuda_stream);
+        return cuda_ret == cudaSuccess;
+    }
+};
+#endif
+
+}
+
+template<thread_scope _Sco>
+template<typename _Allocator, typename... Args>
+bool spinbar<_Sco>::cancel(Args &&... args) noexcept {
+    return detail::__spinbar_cancel<_Allocator>()(cancelled_, std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+__host__ __device__ unsigned constexpr spinbar<_Sco>::max() noexcept {
+    return std::numeric_limits<unsigned>::max();
+}
+
+}}
+
+#endif

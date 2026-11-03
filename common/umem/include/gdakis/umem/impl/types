@@ -1,0 +1,19 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_TYPES
+#define GDAKIS_UMEM_TYPES
+
+#include <functional>
+#include <memory>
+
+namespace gdakis::umem {
+
+template<typename _Tp>
+using ptr_type = std::unique_ptr<_Tp, std::function<void(_Tp *)>>;
+
+}
+
+#endif

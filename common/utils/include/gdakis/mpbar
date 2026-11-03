@@ -1,0 +1,94 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_MPBAR
+#define GDAKIS_MPBAR
+
+#include <atomic>
+#include <pthread.h>
+#include <semaphore.h>
+#include <system_error>
+
+#include <gdakis/__utils_version>
+
+//! @file gdakis/mpbar
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(mpbar) {
+
+//! @brief Multi-process barrier. This type is NOT API compatible with std::barrier
+class mpbar {
+public:
+    //! @brief Arrival token type
+    using arrival_token = unsigned;
+
+protected:
+    //! @brief Number of expected processes arriving to the barrier
+    unsigned expected_;
+    //! @brief Number of processes that still have to arrive to the barrier
+    unsigned pending_;
+    //! @brief Phase value to prevent early re-entries
+    unsigned phase_;
+    //! @brief Boolean set to true if the barrier has been cancelled
+    std::atomic<bool> cancelled_;
+
+    //! @brief Mutex to protect access to the barrier attributes
+    pthread_mutex_t mutex_;
+    //! @brief Condition variable to wait for the barrier
+    ::sem_t sem_;
+
+    //! @brief Deleted copy constructor
+    mpbar(const mpbar &) = delete;
+
+    //! @brief Deleted copy assignment
+    mpbar & operator=(const mpbar &) = delete;
+
+    ///! @brief Arrive to the barrier
+    //! @param n Number of threads arriving to the barrier
+    //! @return Arrival token that can be used to wait for the barrier
+    arrival_token __arrive(unsigned n);
+
+    //! @brief Wait for a barrier using an arrival token returned by a previous arrive operation
+    //! @param token Arrival token
+    //! @return True if the barrier has not been cancelled
+    bool __wait(arrival_token && token);
+
+public:
+    //! @brief Constructor that accepts a completion function
+    //! @param expected Number of threads expected on the barrier
+    mpbar(unsigned expected);
+
+    //! @brief Arrive to the barrier
+    //! @param count Number of threads arriving to the barrier
+    //! @returns Arrival token that can be used to wait for the barrier
+    arrival_token arrive(unsigned count = 1);
+
+    //! @brief Wait on the barrier
+    //! @param token Arrival token returned by the wait operation
+    //! @return True if the barrier has not been cancelled
+    bool wait(arrival_token && token);
+
+    //! @brief Arrive to the barrier and wait until it clears
+    //! @return True if the barrier has not been cancelled
+    bool arrive_and_wait();
+
+    //! @brief Arrive to the barrier and remove the calling thread from the set of expected arrivals
+    void arrive_and_drop();
+
+    //! @brief Cancels the barrier, causing all waiting process to continue
+    void cancel();
+
+    //! @brief Return the maximum number of expected threads supported by the barrier
+    //! @returns Maximum number of threads supported
+    static constexpr unsigned max() noexcept;
+};
+
+}}
+
+#include "impl/mpbar"
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, mpbar)
+
+#endif

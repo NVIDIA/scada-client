@@ -1,0 +1,106 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_IMPL_CPU
+#define GDAKIS_UMEM_IMPL_CPU
+
+#include <cstdlib>
+#include <cstring>
+#include <unistd.h>
+
+#include <sys/mman.h>
+
+namespace gdakis::umem {
+
+namespace {
+static constexpr const char * udma_mem_fd_name = "udma:cpu";
+}
+
+inline bool cpu::supports_dma_buf_from_driver() noexcept {
+    return get_control_fd() >= 0;
+}
+
+inline std::size_t cpu::get_page_size() noexcept {
+    return sysconf(_SC_PAGESIZE);
+}
+
+inline cpu::ptr_type cpu::alloc(std::size_t size) noexcept {
+    return ptr_type(::malloc(size), [](void * p) { ::free(p); });
+}
+
+inline cpu::ptr_type cpu::alloc_system(std::size_t size) noexcept {
+    return cpu::alloc(size);
+}
+
+inline cpu::ptr_type cpu::alloc_pages_shared(std::size_t size) noexcept {
+    std::size_t page_size = get_page_size();
+    std::size_t nr_pages = (size + page_size - 1) / page_size;
+    std::size_t mem_size = nr_pages * page_size;
+    void * p = ::mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED)
+        return nullptr;
+    ::memset(p, 0, mem_size);
+    return ptr_type(p, [mem_size](void * p) { ::munmap(p, mem_size); });
+}
+
+template<typename _Tp>
+inline cpu::dma_buffer_type<_Tp> cpu::alloc_dma_buffer(std::size_t size) noexcept {
+    int mem_fd = alloc_memfd(size);
+    if (mem_fd < 0) {
+        return dma_buffer_type<_Tp>(errno);
+    }
+
+    int dma_fd = get_dma_buf_from_memfd(mem_fd, size);
+    if (dma_fd < 0) {
+        ::close(mem_fd);
+        return dma_buffer_type<_Tp>(errno);
+    }
+
+    void * addr = ::mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dma_fd, 0);
+    if (addr == MAP_FAILED) {
+        ::close(dma_fd);
+        ::close(mem_fd);
+        return dma_buffer_type<_Tp>(errno);
+    }
+
+    return dma_buffer_type<_Tp>(
+        fd(dma_fd), typename buffer<_Tp>::mem(reinterpret_cast<_Tp *>(addr), [size, mem_fd](_Tp * ptr) {
+            ::munmap(ptr, size);
+            ::close(mem_fd);
+        }));
+}
+
+template<typename _Tp, typename... Args>
+inline bool cpu::call_constructor(void * p, Args &&... args) noexcept {
+    new (p) _Tp(std::forward<Args>(args)...);
+    return true;
+}
+
+template<typename _Tp>
+inline void cpu::call_destructor(void * p) noexcept {
+    using object_alias = _Tp;
+    object_alias * obj = reinterpret_cast<_Tp *>(p);
+    obj->~object_alias();
+}
+
+template<typename _Tp, typename _Fn>
+inline bool cpu::call_map(_Tp * p, std::size_t n_elems, _Fn && fn) noexcept {
+    for (std::size_t n = 0; n < n_elems; ++n) {
+        fn(n, p + n);
+    }
+    return true;
+}
+
+inline void cpu::memset(void * ptr, int c, std::size_t size) noexcept {
+    ::memset(ptr, c, size);
+}
+
+inline void cpu::memcpy(void * dst, const void * src, std::size_t size) noexcept {
+    ::memcpy(dst, src, size);
+}
+
+}
+
+#endif

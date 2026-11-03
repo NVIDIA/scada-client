@@ -1,0 +1,529 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_IMPL_CPU_SHMEM
+#define GDAKIS_IPC_IMPL_CPU_SHMEM
+
+#include <gdakis/none>
+#include <gdakis/umem/cpu>
+#include <psa/result>
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <linux/udmabuf.h>
+
+//! @file gdakis/ipc/impl/cpu/shmem
+
+namespace gdakis::comm::ipc {
+
+//! @brief Type to store CPU IPC shared memory pointers
+//! @tparam _Tp Object type for the pointer
+template<typename _Tp>
+class ptr<umem::cpu, _Tp> {
+public:
+    //! @brief CPU IPC Shared memory does not use import/export handles
+    using handle_type = none_type;
+
+    //! @brief CPU IPC Shared memory requires one file descriptor during input/export
+    using ancillary_type = std::array<int, 1>;
+
+    //! @brief Unique pointer holding the CPU IPC shared memory mapping
+    using ptr_type = std::unique_ptr<_Tp, std::function<void(_Tp *)>>;
+
+protected:
+    //! @brief File descriptor associated to the CPU shared memory object
+    int fd_;
+
+    //! @brief Unique pointer holding the CPU IPC shared memory allocation
+    ptr_type ptr_;
+
+    //! @brief Constructor
+    //! @tparam _Fn Functor to initialize the memory contents
+    //! @param fd File descriptor associated to the CPU IPC shared memory
+    //! @param ptr Pointer where the CPU IPC shared memory is mapped
+    //! @param fn Functor to unmap the CPU IPC shared memory upon destruction
+    ptr(int fd, ptr_type && ptr) noexcept : fd_(fd), ptr_(std::move(ptr)) {}
+
+    //! @brief Allow the CPU IPC shared memory allocator to create pointers
+    friend class shmem<umem::cpu, _Tp>;
+
+    //! @brief Allow the CPU IPC shared memory allocator to create pointers
+    friend class shmem<umem::cpu, _Tp[]>;
+
+public:
+    //! @brief Constructor for null allocations
+    inline ptr(std::nullptr_t) noexcept : fd_(-1), ptr_(nullptr) {}
+
+    //! @brief Move onstructor
+    //! @param other Pointer being moved
+    inline ptr(ptr && other) noexcept : fd_(other.fd_), ptr_(std::move(other.ptr_)) { other.fd_ = -1; }
+
+    //! @brief Destructor
+    inline ~ptr() noexcept {
+        if (fd_ >= 0)
+            ::close(fd_);
+    }
+
+    //! @brief Get the pointer where the CPU IPC shared memory is mapped
+    //! @return Pointer to the CPU IPC shared memory
+    _Tp * get() const noexcept { return ptr_.get(); }
+
+    //! @brief Get the ancillary data required to export the CPU IPC shared memory
+    //! @return Ancillary data
+    ancillary_type ancillary() const noexcept { return ancillary_type { fd_ }; }
+
+    //! @brief Get the handle required to export the CPU IPC shared memory
+    //! @return Handle associated to the CPU IPC shared memory, or error if the handle is invalid
+    psa::result<handle_type, int> handle() const noexcept {
+        if (ptr_ == nullptr or fd_ < 0)
+            return psa::result<handle_type, int>::err(ENOMEM);
+        return psa::result<handle_type, int>::ok(none_type());
+    }
+
+    //! @brief Equality comparison operator with nullptr
+    bool operator==(std::nullptr_t) const noexcept { return ptr_ == nullptr; }
+
+    //! @brief Inequality comparison operator with nullptr
+    bool operator!=(std::nullptr_t) const noexcept { return ptr_ != nullptr; }
+};
+
+template<typename _Tp>
+class dma_ptr<umem::cpu, _Tp> : public ptr<umem::cpu, _Tp> {
+public:
+    //! @brief CPU IPC Shared memory requires one file descriptor during input/export
+    using ancillary_type = std::array<int, 2>;
+
+protected:
+    //! @brief Base pointer class
+    using base_ptr = ptr<umem::cpu, _Tp>;
+
+    //! @brief Unique pointer holding the CPU IPC shared memory mapping
+    using ptr_type = typename base_ptr::ptr_type;
+
+    //! @brief File descriptor associated to the CPU dma-buf
+    int dma_fd_;
+
+    //! @brief Constructor
+    //! @param fd File descriptor associated to the CPU IPC shared memory
+    //! @param ptr Pointer where the CPU IPC shared memory is mapped
+    //! @param fn Functor to unmap the CPU IPC shared memory upon destruction
+    dma_ptr(int fd, int dma_fd, ptr_type && ptr) noexcept : base_ptr(fd, std::move(ptr)), dma_fd_(dma_fd) {}
+
+    //! @brief Allow the CPU IPC shared memory allocator to create pointers
+    friend class shmem<umem::cpu, _Tp>;
+
+    //! @brief Allow the CPU IPC shared memory allocator to create pointers
+    friend class shmem<umem::cpu, _Tp[]>;
+
+public:
+    //! @brief Constructor for null allocations
+    inline dma_ptr(std::nullptr_t) noexcept : base_ptr(nullptr), dma_fd_(-1) {}
+
+    //! @brief Move onstructor
+    //! @param other Pointer being moved
+    inline dma_ptr(dma_ptr && other) noexcept : base_ptr(std::move(other)), dma_fd_(other.dma_fd_) {
+        other.dma_fd_ = -1;
+    }
+
+    //! @brief Destructor
+    inline ~dma_ptr() noexcept {
+        if (dma_fd_ >= 0)
+            ::close(dma_fd_);
+    }
+
+    //! @brief Get the ancillary data required to export the CPU IPC shared memory
+    //! @return Ancillary data
+    ancillary_type ancillary() const noexcept { return ancillary_type { base_ptr::fd_, dma_fd_ }; }
+
+    //! @brief Get the DMA buffer associated the CPU IPC shared memory
+    //! @return Associated DMA buffer or an error
+    int dma_buf() const noexcept { return dma_fd_; }
+};
+
+namespace cpu {
+
+class base_shmem {
+public:
+    //! @brief Checks if the CPU supports DMA buffers
+    //! @returns True if the CPU supports DMA buffers
+    static inline bool supports_dma_buf_from_driver() noexcept { return ::access("/dev/udmabuf", R_OK | W_OK) == 0; }
+
+protected:
+    //! @brief Returns the memory alignment required for DMA memory
+    //! @return Alignment value for DMA memory or error
+    static inline psa::result<std::size_t, int> get_dma_memory_alignment() noexcept {
+        auto ret = sysconf(_SC_PAGESIZE);
+        return ret < 0 ? psa::result<std::size_t, int>::err(EINVAL)
+                       : psa::result<std::size_t, int>::ok(static_cast<std::size_t>(ret));
+    }
+
+    //! @brief Returns the minimum memory allocation size for DMA memory
+    //! @param device CUDA device where to get the alignment requirement
+    //! @param size Memory allocation size
+    //! @return Required allocation size for DMA memory or error
+    static inline psa::result<std::size_t, int> get_dma_memory_size(std::size_t size) noexcept {
+        return get_dma_memory_alignment().map([size](std::size_t alignment) {
+            return static_cast<std::size_t>(((size + alignment - 1) / alignment) * alignment);
+        });
+    }
+};
+
+template<typename _Tp>
+class shmem : public base_shmem {
+protected:
+    //! @brief Pointer type to hold memory allocations
+    using ptr_type = typename ptr<umem::cpu, _Tp>::ptr_type;
+
+    //! @brief Allocates DMA capable memory
+    //! @param device CUDA device where to allocate the memory
+    //! @param size Memory size to allocate
+    //! @return Pointer to the allocated memory
+    static inline std::tuple<int, ptr_type> alloc_dma_memory(std::size_t size) noexcept {
+
+        auto alignment = get_dma_memory_alignment();
+        if (alignment.is_err())
+            return std::make_tuple<int, ptr_type>(-1, nullptr);
+        auto dma_mem_size = get_dma_memory_size(size);
+        if (dma_mem_size.is_err())
+            return std::make_tuple<int, ptr_type>(-1, nullptr);
+        auto mem_size = dma_mem_size.ok();
+
+        int fd = ::memfd_create("gdakis:shmem", MFD_ALLOW_SEALING);
+        if (fd < 0)
+            return std::make_tuple<int, ptr_type>(-1, nullptr);
+
+        int err = fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK);
+        if (err < 0) {
+            ::close(fd);
+            return std::make_tuple<int, ptr_type>(-1, nullptr);
+        }
+
+        err = ftruncate(fd, mem_size);
+        if (err < 0) {
+            ::close(fd);
+            return std::make_tuple<int, ptr_type>(-1, nullptr);
+        }
+        auto raw_ptr = ::mmap(nullptr, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (raw_ptr == MAP_FAILED) {
+            ::close(fd);
+            return std::make_tuple<int, ptr_type>(-1, nullptr);
+        }
+        return std::make_tuple(fd, ptr_type(reinterpret_cast<_Tp *>(raw_ptr), [](_Tp * p) {
+            ::munmap(reinterpret_cast<void *>(p), sizeof(_Tp));
+        }));
+    }
+
+    //! @brief Gets a DMA buffer for the memory
+    //! @param ptr Pointer to the CUDA memory to obtain the IPC handle for
+    //! @param size Size of the allocated memory
+    //! @return DMA buffer
+    static inline int get_dma_buf(int fd, std::size_t size) noexcept {
+
+        auto mem_size = get_dma_memory_size(size);
+        if (mem_size.is_err())
+            return -1;
+
+        int ctrl_fd;
+        ctrl_fd = ::open("/dev/udmabuf", O_RDWR);
+        if (ctrl_fd < 0)
+            return -1;
+
+        ::udmabuf_create create;
+        create.memfd = fd;
+        create.flags = 0;
+        create.offset = 0;
+        create.size = mem_size.ok();
+
+        int dma_fd = ::ioctl(ctrl_fd, UDMABUF_CREATE, &create);
+        ::close(ctrl_fd);
+        return dma_fd;
+    }
+
+    //! @brief Imports CPU memory from a memfd
+    //! @param mem_fd File descriptor to import the memory from
+    //! @param required_bytes Minimum size the imported fd must back; the fd is rejected if smaller
+    //! @return Pointer to the imported memory
+    static inline ptr_type import_ipc_handle(int mem_fd, std::size_t required_bytes) noexcept {
+        struct ::stat mem_stat;
+        int ret = ::fstat(mem_fd, &mem_stat);
+        if (ret < 0)
+            return nullptr;
+
+        auto mem_size = mem_stat.st_size;
+        // Reject any client fd that is smaller than the declared geometry needs.
+        if (mem_size < 0 || static_cast<std::size_t>(mem_size) < required_bytes)
+            return nullptr;
+        auto raw_ptr = ::mmap(nullptr, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, 0);
+        if (raw_ptr == MAP_FAILED) {
+            return nullptr;
+        }
+
+        return ptr_type(
+            reinterpret_cast<_Tp *>(raw_ptr), [mem_size](_Tp * p) { ::munmap(reinterpret_cast<void *>(p), mem_size); });
+    }
+};
+
+}
+
+//! @brief CUDA IPC shared memory helper
+template<>
+class shmem<umem::cpu, void> : public cpu::base_shmem {
+public:
+    static inline bool supports_dma() noexcept { return supports_dma_buf_from_driver(); }
+};
+
+//! @brief CPU IPC shared memory allocator/importer for single objects
+//! @tparam _Tp Object types stored in the shared memory
+template<typename _Tp>
+class shmem<umem::cpu, _Tp> : public cpu::shmem<_Tp> {
+protected:
+    //! @brief Base class
+    using base_shmem = cpu::shmem<_Tp>;
+
+    //! @brief CPU IPC shared memory pointer
+    using ptr_type = ptr<umem::cpu, _Tp>;
+
+    //! @brief CPU IPC DMA-capable memory pointer
+    using dma_ptr_type = dma_ptr<umem::cpu, _Tp>;
+
+    //! @brief CPU IPC shared memory handle needed for import/export operations
+    using handle_type = typename ptr_type::handle_type;
+
+    //! @brief Allocate a single object on CPU IPC shared memory
+    //! @tparam ...Args Argument types passed to the object constructor
+    //! @param ...args Arguments forwarded to the object constructor
+    //! @return File descriptor and pointer containing the allocated object
+    template<typename... Args>
+    static inline std::tuple<int, typename base_shmem::ptr_type> alloc_ipc_ptr(Args &&... args) noexcept {
+        auto ret = base_shmem::alloc_dma_memory(sizeof(_Tp));
+        int fd = std::get<0>(ret);
+        if (fd < 0)
+            return ret;
+
+        const auto & ptr = std::get<1>(ret);
+        if (ptr == nullptr) {
+            ::close(fd);
+            return ret;
+        }
+
+        new (ptr.get()) _Tp(std::forward<Args>(args)...);
+        return ret;
+    }
+
+public:
+    //! @brief Allocate a single object on CPU IPC shared memory
+    //! @tparam ...Args Argument types passed to the object constructor
+    //! @param ...args Arguments forwarded to the object constructor
+    //! @return CPU IPC shared memory containing the allocated object
+    template<typename... Args>
+    static inline ptr_type alloc(Args &&... args) noexcept {
+        auto ret = alloc_ipc_ptr(std::forward<Args>(args)...);
+
+        int fd = std::get<0>(ret);
+        if (fd < 0)
+            return nullptr;
+
+        auto ptr = std::move(std::get<1>(ret));
+        if (ptr == nullptr) {
+            ::close(fd);
+            return nullptr;
+        }
+        return ptr_type(fd, std::move(ptr));
+    }
+
+    //! @brief Allocate a single object on CPU IPC shared memory
+    //! @tparam ...Args Argument types passed to the object constructor
+    //! @param ...args Arguments forwarded to the object constructor
+    //! @return CPU IPC shared memory containing the allocated object
+    template<typename... Args>
+    static inline ptr<umem::cpu, _Tp> alloc_dma(Args &&... args) noexcept {
+        if (base_shmem::supports_dma_buf_from_driver() == false)
+            return nullptr;
+
+        auto ret = alloc_ipc_ptr(std::forward<Args>(args)...);
+
+        int fd = std::get<0>(ret);
+        if (fd < 0)
+            return nullptr;
+
+        auto ptr = std::move(std::get<1>(ret));
+        if (ptr == nullptr) {
+            ::close(fd);
+            return nullptr;
+        }
+
+        auto mem_size = base_shmem::get_dma_memory_size(sizeof(_Tp));
+        if (mem_size.is_err()) {
+            ::close(fd);
+            return nullptr;
+        }
+
+        auto dma_buf = base_shmem::get_dma_buffer(ptr, mem_size.ok());
+
+        return dma_ptr_type(fd, dma_buf, std::move(ptr));
+    }
+
+//! @brief Imports a CPU IPC shared memory region containing a single object given a handle and its ancillary data
+//! @param handle CPU IPC shared memory handle
+//! @param ancillary CPU IPC ancillary data
+//! @return CPU IPC shared memory pointer
+#pragma nv_diag_suppress 3189
+    static inline ptr<umem::cpu, _Tp> import(
+        handle_type && handle, const typename ptr_type::ancillary_type & ancillary) noexcept {
+        auto ret = base_shmem::import_ipc_handle(std::get<0>(ancillary), sizeof(_Tp));
+        if (ret == nullptr)
+            return nullptr;
+        return ptr_type(std::get<0>(ancillary), std::move(ret));
+    }
+
+//! @brief Imports a CPU IPC shared DMA memory region containing a single object given a handle and its ancillary data
+//! @param handle CPU IPC shared memory handle
+//! @param ancillary CPU IPC ancillary data
+//! @return CPU IPC shared memory pointer
+#pragma nv_diag_suppress 3189
+    static inline dma_ptr<umem::cpu, _Tp> import_dma(
+        handle_type && handle, const typename dma_ptr_type::ancillary_type & ancillary) noexcept {
+        auto ret = base_shmem::import_ipc_handle(std::get<0>(ancillary), sizeof(_Tp));
+        if (ret == nullptr)
+            return nullptr;
+        return dma_ptr_type(std::get<0>(ancillary), std::get<1>(ancillary), std::move(ret));
+    }
+};
+
+//! @brief CPU IPC shared memory allocator/importer for multiple objects
+//! @tparam _Tp Object types stored in the shared memory
+template<typename _Tp>
+class shmem<umem::cpu, _Tp[]> : public cpu::shmem<_Tp> {
+protected:
+    //! @brief Base class
+    using base_shmem = cpu::shmem<_Tp>;
+
+    //! @brief CPU IPC shared memory pointer
+    using ptr_type = ptr<umem::cpu, _Tp>;
+
+    //! @brief CPU IPC shared DMA memory pointer
+    using dma_ptr_type = dma_ptr<umem::cpu, _Tp>;
+
+    //! @brief CPU IPC shared memory handle needed for import/export operations
+    using handle_type = typename ptr_type::handle_type;
+
+    //! @brief Allocates multiple objects in a CPU IPC shared memory region
+    //! @tparam _Fn Functor type to initialize the allocated objects
+    //! @param n_elems Number of objects to allocate
+    //! @param fn Functor to initialize the allocated objects
+    //! @return CPU IPC shared memory containing the allocated objects
+    template<typename _Fn>
+    static inline std::tuple<int, typename base_shmem::ptr_type> alloc_ipc_ptr(size_t n_elems, _Fn && fn) noexcept {
+        auto ret = base_shmem::alloc_dma_memory(n_elems * sizeof(_Tp));
+        int fd = std::get<0>(ret);
+        if (fd < 0)
+            return std::make_tuple<int, typename base_shmem::ptr_type>(-1, nullptr);
+
+        const auto & ptr = std::get<1>(ret);
+        if (ptr == nullptr) {
+            ::close(fd);
+            return std::make_tuple<int, typename base_shmem::ptr_type>(-1, nullptr);
+        }
+
+        umem::cpu::call_map(ptr.get(), n_elems, std::forward<_Fn>(fn));
+        return ret;
+    }
+
+public:
+    //! @brief Allocates multiple objects in a CPU IPC shared memory region
+    //! @tparam _Fn Functor type to initialize the allocated objects
+    //! @param n_elems Number of objects to allocate
+    //! @param fn Functor to initialize the allocated objects
+    //! @return CPU IPC shared memory containing the allocated objects
+    template<typename _Fn>
+    static inline ptr<umem::cpu, _Tp> alloc(size_t n_elems, _Fn && fn) noexcept {
+        auto ret = alloc_ipc_ptr(n_elems, std::forward<_Fn>(fn));
+        int fd = std::get<0>(ret);
+        if (fd < 0)
+            return nullptr;
+
+        auto ptr = std::move(std::get<1>(ret));
+        if (ptr == nullptr) {
+            ::close(fd);
+            return nullptr;
+        }
+        return ptr_type(fd, std::move(ptr));
+    }
+
+    //! @brief Allocates multiple objects in a CPU IPC shared memory region
+    //! @tparam _Fn Functor type to initialize the allocated objects
+    //! @param n_elems Number of objects to allocate
+    //! @param fn Functor to initialize the allocated objects
+    //! @return CPU IPC shared memory containing the allocated objects
+    template<typename _Fn>
+    static inline dma_ptr<umem::cpu, _Tp> alloc_dma(size_t n_elems, _Fn && fn) noexcept {
+        if (base_shmem::supports_dma_buf_from_driver() == false)
+            return nullptr;
+
+        auto ret = alloc_ipc_ptr(n_elems, std::forward<_Fn>(fn));
+        int fd = std::get<0>(ret);
+        if (fd < 0)
+            return nullptr;
+
+        auto ptr = std::move(std::get<1>(ret));
+        if (ptr == nullptr) {
+            ::close(fd);
+            return nullptr;
+        }
+
+        auto mem_size = base_shmem::get_dma_memory_size(sizeof(_Tp));
+        if (mem_size.is_err()) {
+            ::close(fd);
+            return nullptr;
+        }
+
+        auto dma_fd = base_shmem::get_dma_buf(fd, mem_size.ok());
+
+        return dma_ptr_type(fd, dma_fd, std::move(ptr));
+    }
+
+    //! @brief Imports a CPU IPC shared memory region containing multiple objects given a handle and its ancillary data
+    //! @param handle CPU IPC shared memory handle
+    //! @param ancillary CPU IPC ancillary data
+    //! @param n_elems Number of object to import
+    //! @return CPU IPC shared memory pointer
+    static inline ptr<umem::cpu, _Tp> import(
+        handle_type && handle, const typename ptr_type::ancillary_type & ancillary, size_t n_elems) noexcept {
+        // Reject if the declared element count overflows the required byte size.
+        if (n_elems != 0 && n_elems > (SIZE_MAX / sizeof(_Tp)))
+            return nullptr;
+        auto ret = base_shmem::import_ipc_handle(std::get<0>(ancillary), n_elems * sizeof(_Tp));
+        if (ret == nullptr)
+            return nullptr;
+        return ptr_type(std::get<0>(ancillary), std::move(ret));
+    }
+
+    //! @brief Imports a CPU IPC shared memory region containing multiple objects given a handle and its ancillary data
+    //! @param handle CPU IPC shared memory handle
+    //! @param ancillary CPU IPC ancillary data
+    //! @param n_elems Number of object to import
+    //! @return CPU IPC shared memory pointer
+    static inline dma_ptr<umem::cpu, _Tp> import_dma(
+        handle_type && handle, const typename dma_ptr_type::ancillary_type & ancillary, size_t n_elems) noexcept {
+        // Reject if the declared element count overflows the required byte size.
+        if (n_elems != 0 && n_elems > (SIZE_MAX / sizeof(_Tp)))
+            return nullptr;
+        auto ret = base_shmem::import_ipc_handle(std::get<0>(ancillary), n_elems * sizeof(_Tp));
+        if (ret == nullptr)
+            return nullptr;
+        return dma_ptr_type(std::get<0>(ancillary), std::get<1>(ancillary), std::move(ret));
+    }
+};
+
+}
+
+#endif

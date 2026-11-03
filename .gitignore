@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+build*/
+_deps/
+.cache/
+__pycache__/
+*.pyc
+compile_commands.json
+.DS_Store

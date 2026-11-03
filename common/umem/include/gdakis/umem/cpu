@@ -1,0 +1,104 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_CPU
+#define GDAKIS_UMEM_CPU
+
+#include <gdakis/umem/dma>
+#include <gdakis/umem/impl/types>
+
+//! @file gdakis/umem/cpu
+
+namespace gdakis::umem {
+
+//! @brief Allocator for CPU memory
+class cpu {
+protected:
+    static int get_control_fd() noexcept;
+
+    static int alloc_memfd(std::size_t &) noexcept;
+
+    static int get_dma_buf_from_memfd(int, std::size_t) noexcept;
+
+public:
+    //! @brief Pointer type returned by this allocator
+    using ptr_type = umem::ptr_type<void>;
+
+    //! @brief Pointer type returned by this allocator
+    //! @brief _Tp Type of the DMA buffer
+    template<typename _Tp>
+    using dma_buffer_type = umem::buffer<_Tp>;
+
+    //! @brief Check if a DMA allocations can be transformed into dma-buf
+    //! @return Whether DMA allocations can be transformed into a dma-buf
+    static bool supports_dma_buf_from_driver() noexcept;
+
+    //! @brief Page size (in bytes) for CPU allocations
+    static std::size_t get_page_size() noexcept;
+
+    //! @brief Allocate CPU memory
+    //! @param size Size (in bytes) of the memory to allocate
+    //! @return Pointer to the allocated memory or nullptr
+    static ptr_type alloc(std::size_t size) noexcept;
+
+    //! @brief Allocate CPU memory
+    //! @param size Size (in bytes) of the memory to allocate
+    //! @return Pointer to the allocated memory or nullptr
+    static ptr_type alloc_system(std::size_t size) noexcept;
+
+    //! @brief Allocate CPU memory that shared across child processes
+    //! @param size Size (in bytes) of the memory to allocate
+    //! @return Pointer to the allocated memory or nullptr
+    static ptr_type alloc_pages_shared(std::size_t size) noexcept;
+
+    //! @brief Allocates a GPU memory buffer suitable as DMA target
+    //! @brief _Tp Type of the DMA buffer
+    //! @param size Size (in bytes) of the memory to allocate
+    template<typename _Tp>
+    static dma_buffer_type<_Tp> alloc_dma_buffer(std::size_t size) noexcept;
+
+    //! @brief Calls the constructor of an object on the CPU
+    //! @tparam _Tp Type of the object
+    //! @tparam ...Args Type of the arguments passed to the constructor
+    //! @param addr Memory address where the object being initialized resides
+    //! @param ...args Arguments to pass to the constructor
+    //! @return True if the call succeeded
+    template<typename _Tp, typename... Args>
+    static bool call_constructor(void * addr, Args &&... args) noexcept;
+
+    //! @brief Calls the destructor of an object on the CPU
+    //! @tparam _Tp Type of the object
+    //! @param addr Memory address where the object being initialized resides
+    template<typename _Tp>
+    static void call_destructor(void * addr) noexcept;
+
+    //! @brief Executes an operation for each CPU object in an array
+    //! @tparam _Tp Type of the object
+    //! @tparam _Fn Functor type of the operation
+    //! @param addr Memory address where the object array resides
+    //! @param size Number of objects in the array
+    //! @param fn Functor implementing the operation to execute
+    //! @return True if the call succeeded
+    template<typename _Tp, typename _Fn>
+    static bool call_map(_Tp * addr, std::size_t size, _Fn && fn) noexcept;
+
+    //! @brief Initializes CPU memory
+    //! @param addr Memory address to initialize
+    //! @param value Value to set each byte in the memory to
+    //! @param size Size (in bytes) of the memory to initialize
+    static void memset(void * addr, int value, std::size_t size) noexcept;
+
+    //! @brief Copies a CPU memory region to another CPU memory region
+    //! @param dst Memory address of the destination memory region
+    //! @param src Memory address of the source memory region
+    //! @param size Size (in bytes) of the memory to initialize
+    static void memcpy(void * src, const void * dst, std::size_t size) noexcept;
+};
+
+}
+
+#include "impl/cpu"
+
+#endif

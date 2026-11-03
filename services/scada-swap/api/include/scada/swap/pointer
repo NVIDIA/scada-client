@@ -1,0 +1,60 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_POINTER
+#define SCADA_SWAP_POINTER
+
+//! @file scada/swap/pointer
+
+#include <scada/swap/__cuda_compat>
+
+#include <scada/__scada_swap_version>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(pointer) {
+
+//! @brief Pointer type used by mdspan to access data through the underlying portal
+//!
+//! @tparam _Portal Portal type
+template<typename _Portal>
+class pointer_type {
+protected:
+    using portal_type = _Portal;
+    using index_type = typename portal_type::index_type;
+
+    portal_type * portal_;
+    index_type index_;
+
+public:
+    //! @brief Reference type for the underlying data
+    using reference_type = typename portal_type::reference_type;
+
+    //! @brief Constructor that takes a pointer to the portal and the index
+    //! @param portal Pointer to the portal
+    //! @param index Starting index
+    __host__ __device__ constexpr pointer_type(portal_type * portal, index_type index) noexcept;
+
+    //! @brief Dereference operator to get reference to the data being pointed to
+    //! @return The reference to the data being pointed to
+    __host__ __device__ constexpr reference_type operator*() const noexcept;
+
+    //! @brief Operator to add an offset to the pointer
+    //! @param i Offset to add to the pointer
+    //! @return Pointer pointing to the data at index+i
+    __host__ __device__ constexpr pointer_type operator+(const std::size_t & i) const noexcept;
+
+    //! @brief Inequality comparison operator to compare against another pointer
+    //! @param rhs Other pointer to compare against
+    //! @return False if pointer is same as rhs, True otherwise
+    __host__ __device__ constexpr bool operator!=(const pointer_type & rhs) const noexcept;
+};
+
+}}
+
+#include "impl/pointer"
+
+SCADA_SWAP_EXPORT_SIMPLE_NS(scada::swap, pointer)
+
+#endif

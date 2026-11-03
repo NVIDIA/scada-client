@@ -1,0 +1,160 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IPC_IO_BUFFER_POOL
+#define GDAKIS_IPC_IO_BUFFER_POOL
+
+#include <optional>
+
+#include <psa/result>
+
+#include <gdakis/atomic>
+#include <gdakis/ipc/protocol>
+#include <gdakis/ipc/shmem>
+
+//! @file gdakis/ipc/io_buffer_pool
+
+namespace gdakis::comm::ipc {
+
+//! @brief I/O Buffer Pool using shared memory
+//! @tparam _Td Data type stored in the I/O buffer pool
+//! @tparam _Ts Base status type stored in the I/O buffer pool
+//! @tparam _Sco Synchronization scope
+template<typename _Td, typename _Ts, thread_scope _Sco = thread_scope_device>
+class io_buffer_pool {
+public:
+    //! @brief Status type in the pool
+    //! This type is atomic since we expect threads to poll on them
+    using status_type = _Ts;
+
+    //! @brief Handle type that owns the I/O buffer pool resources
+    //! @tparam _Allocator GDAKIS allocator that determines the memory where the autobatch is allocated
+    template<typename _Allocator>
+    class handle {
+    protected:
+        //! @brief Pointer type to the data blocks in the I/O buffer pool
+        using data_ptr = dma_ptr<_Allocator, _Td>;
+
+        //! @brief Pointer type to the status in the I/O buffer pool
+        using status_ptr = dma_ptr<_Allocator, status_type>;
+
+        //! @brief Number of blocks in the I/O buffer pool
+        unsigned num_blocks_;
+
+        //! @brief Flag for DMA usage for the I/O buffer pool
+        bool is_dma_;
+
+        //! @brief Pointer to the data blocks in the I/O buffer pool
+        data_ptr data_;
+
+        //! @brief Pointer to the status words in the I/O buffer pool
+        status_ptr status_;
+
+        //! @brief Identifier assigned to the I/O buffer pool upon successful registration on the server
+        std::optional<int> id_;
+
+        //! @brief Return type for handle creation
+        using result_type = psa::result<handle, int>;
+
+        //! @brief Backend type implementing device-specific operations
+        using backend_type = allocator_backend_t<_Allocator>;
+
+        //! @brief I/O buffer pool registration request type
+        using request_type = message<operation::register_io_buffer_pool, backend_type>;
+
+        //! @brief I/O buffer pool registration response type
+        using response_type = acknowledge<operation::register_io_buffer_pool, backend_type>;
+
+        //! @brief Build a registration request for the I/O buffer pool
+        //! @returns Registration request, or an error if the operation fails
+        psa::result<request_type, int> request() const noexcept;
+
+        //! @brief Default constructor
+        //! @param num_blocks Number of buffers in the I/O buffer pool
+        //! @param data Pointer to the data blocks
+        //! @param status Pointer to the status words
+        //! @param is_dma Flag for DMA usage for the I/O buffer pool (default to be false)
+        handle(unsigned num_blocks, data_ptr && data, status_ptr && status, bool is_dma = false) noexcept;
+
+    public:
+//! @brief Default move constructor
+#pragma nv_exec_check_disable
+        handle(handle &&) noexcept = default;
+
+//! @brief Default destructor
+#pragma nv_exec_check_disable
+        ~handle() noexcept = default;
+
+        //! @brief Builds a new I/O buffer pool and returns the owning handler
+        //! @param num_blocks Number of buffers in the I/O buffer pool
+        //! @param fn Functor to initialize data blocks
+        //! @param gn Functor to initialize status words
+        //! @param is_dma Flag for DMA usage for the I/O buffer pool (default to be false)
+        template<typename _Fn, typename _Gn>
+        static result_type build(unsigned num_blocks, _Fn && fn, _Gn && gn, bool is_dma = false) noexcept;
+
+        //! @brief Register I/O buffer pool in a server
+        //! @tparam _Socket Socket type to send the registration through
+        //! @param socket Socket to send the registration through
+        //! @return Return type of the _Socket send operation
+        template<typename _Socket>
+        auto send_to_server(_Socket & socket) noexcept;
+
+        //! @brief Get the I/O buffer pool
+        //! @return I/O buffer pool
+        io_buffer_pool get() const noexcept;
+
+        //! @brief Get identifier assigned to the I/O buffer pool upon registration
+        //! @return Assigned identifier or none if not registered
+        const std::optional<int> id() const noexcept;
+
+        //! @brief get the raw pointer to the data blocks in the I/O buffer pool
+        //! @return Raw Pointer to the data blocks in the I/O buffer pool
+        _Td * data() const noexcept;
+    };
+
+protected:
+    //! @brief I/O buffer pool identifier
+    int id_;
+    //! @brief Number of blocks in the I/O buffer pool
+    unsigned num_blocks_;
+    //! @brief Pointer to the data blocks
+    _Td * data_;
+    //! @brief Pointer to the status words
+    status_type * status_;
+    //! @brief Flag for DMA usage for the I/O buffer pool
+    bool is_dma_;
+
+    //! @brief Constructor
+    //! @param id I/O buffer pool identifier
+    //! @param num_blocks Number of blocks in the I/O buffer pool
+    //! @param data Pointer to the data blocks
+    //! @param status Pointer to the status words
+    //! @param is_dma Flag for DMA usage for the I/O buffer pool (default to be false)
+    io_buffer_pool(int id, unsigned num_blocks, _Td * data, status_type * status, bool is_dma = false) noexcept;
+
+public:
+    //! @brief Get the I/O buffer pointer identifier
+    //! @returns I/O buffer pool identifier
+    __host__ __device__ int id() const noexcept;
+
+    //! @brief Get the number of blocks in the I/O buffer pool
+    //! @return Number of blocks in the I/O buffer pool
+    __host__ __device__ unsigned number_of_blocks() const noexcept;
+
+    //! @brief Get pointer to the I/O buffer pool data blocks
+    //! @return Pointer to the I/O buffer pool data blocks
+    __host__ __device__ _Td * data() const noexcept;
+
+    //! @brief Get pointer to the I/O buffer pool status words
+    //! @return Pointer to the I/O buffer pool status words
+    __host__ __device__ status_type * status() const noexcept;
+};
+
+}
+
+#include "impl/io_buffer_pool"
+
+#endif

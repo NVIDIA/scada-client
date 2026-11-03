@@ -1,0 +1,106 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+ 
+#ifndef TESTS_PROCESS
+#define TESTS_PROCESS
+
+#include <psa/result>
+
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+
+#include <pthread.h>
+
+struct process_handle {
+    pid_t   pid_;
+
+    inline
+    process_handle(pid_t pid) noexcept :
+        pid_(pid)
+    {}
+
+    inline bool
+    wait() const noexcept {
+        int status = 0;
+        int err = ::waitpid(pid_, &status, 0);
+        if(err != pid_) return false;
+        return WEXITSTATUS(status) == EXIT_SUCCESS;
+    }
+
+    inline void
+    kill(int sig = SIGTERM) const noexcept {
+        ::kill(pid_, sig);
+    }
+};
+
+template<typename _Fn>
+static inline
+psa::result<process_handle, int>
+process(_Fn && fn)
+{
+    pid_t pid = fork();
+    if(pid < 0) return psa::result<process_handle, int>::err(errno);
+    else if(pid != 0) return psa::result<process_handle, int>::ok(pid);
+
+    fn();
+    if(::testing::Test::HasFatalFailure()) {
+        ::exit(EXIT_FAILURE);
+    }
+    ::exit(EXIT_SUCCESS);
+}
+
+
+
+class ipc_barrier {
+protected:
+    std::shared_ptr<pthread_barrier_t>  posix_;
+
+    inline
+    ipc_barrier(std::shared_ptr<pthread_barrier_t> && bar) noexcept :
+        posix_(std::move(bar))
+    {}
+
+public:
+    inline
+    ipc_barrier(ipc_barrier &&) noexcept = default;
+
+    inline
+    void
+    arrive_and_wait() const noexcept {
+        pthread_barrier_wait(posix_.get());
+    }
+
+    static inline
+    psa::result<ipc_barrier, int>
+    make(unsigned count) noexcept {
+        using result_type = psa::result<ipc_barrier, int>;
+        pthread_barrierattr_t attr;
+
+        int err = pthread_barrierattr_init(&attr);
+        if(err != 0) return result_type::err(err);
+        err = pthread_barrierattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+        if(err != 0) return result_type::err(err);
+    
+
+        pthread_barrier_t * barrier = reinterpret_cast<pthread_barrier_t *>(
+            ::mmap(0, sizeof(pthread_barrier_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)
+        );
+        if(barrier == reinterpret_cast<pthread_barrier_t *>(MAP_FAILED)) return result_type::err(errno);
+
+        if(pthread_barrier_init(barrier, &attr, count) != 0) {
+            ::munmap(barrier, sizeof(pthread_barrier_t));
+            return result_type::err(errno);
+        }
+
+        return result_type::ok(ipc_barrier(
+            std::shared_ptr<pthread_barrier_t>(barrier, [](pthread_barrier_t * bar) {
+                ::munmap(bar, sizeof(pthread_barrier_t));
+            })
+        ));
+    }
+};
+
+#endif

@@ -1,0 +1,29 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_CONCEPTS
+#define PSA_COAIO_CONCEPTS
+
+#include <psa/futures>
+#include <psa/result>
+
+namespace psa { namespace coaio {
+
+#if defined(__cpp_concepts)
+
+template<typename _Handle>
+concept Handle = requires(_Handle h, typename _Handle::event_type e) { typename _Handle::event_type; };
+
+template<typename _Sched>
+concept Scheduler = requires(_Sched sched, int fd) {
+    requires Handle<typename _Sched::handle_type>;
+    { sched.register_file_descriptor(fd).ok() } -> std::convertible_to<typename _Sched::handle_type &>;
+};
+
+#endif
+
+}}
+
+#endif

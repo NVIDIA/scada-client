@@ -1,0 +1,56 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_REFERENCE
+#define SCADA_SWAP_REFERENCE
+
+//! @file scada/swap/reference
+
+#include <scada/swap/__cuda_compat>
+
+#include <scada/__scada_swap_version>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(reference) {
+
+//! @brief Reference type for the mdspan to access data through a portal
+//! @tparam _Portal Portal data type
+template<typename _Portal>
+class reference_type {
+protected:
+    //! @brief Portal type
+    using portal_type = _Portal;
+    //! @brief Index type
+    using index_type = typename _Portal::index_type;
+    //! @brief Data element type
+    using value_type = typename _Portal::value_type;
+
+    //! @brief Pointer to the portal
+    portal_type * portal_;
+    //! @brief Index for the data the reference is referring to
+    const index_type index_;
+
+public:
+    //! @brief Constructor for the reference type
+    //! @param portal Pointer to the portal used to get backing data
+    //! @param idx Index of the data element where the reference is pointing to
+    __host__ __device__ constexpr reference_type(portal_type * portal, const index_type idx) noexcept;
+
+    //! @brief Implicit conversion to the data element type
+    __host__ __device__ constexpr operator value_type() const noexcept;
+
+    //! @brief Assignment operator
+    //! @param rhs Reference whose value will be copied
+    //! @return Assigned reference type
+    __host__ __device__ constexpr reference_type operator=(const value_type & rhs) const noexcept;
+};
+
+}}
+
+#include "impl/reference"
+
+SCADA_SWAP_EXPORT_SIMPLE_NS(scada::swap, reference)
+
+#endif

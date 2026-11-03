@@ -1,0 +1,65 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_IMPL_DETACHED
+#define PSA_COAIO_IMPL_DETACHED
+
+#if defined(__psa_use_coroutines)
+
+#  include <coroutine>
+#  include <list>
+
+namespace psa { namespace coaio {
+
+struct detached::promise_type {
+
+    std::coroutine_handle<> trigger_;
+
+    inline void trigger(std::coroutine_handle<> && trigger) noexcept {
+        assert(trigger_ == nullptr);
+        trigger_ = std::move(trigger);
+    }
+
+    inline bool is_ready() const noexcept { return false; }
+
+    inline detached get_return_object() const noexcept { return {}; }
+
+    inline std::suspend_never initial_suspend() const noexcept { return {}; }
+
+    inline auto final_suspend() const noexcept {
+        struct promise_awaiter {
+            inline bool await_ready() const noexcept { return false; }
+            inline std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> handle) const noexcept {
+                return handle.promise().trigger_ ? handle.promise().trigger_ : std::noop_coroutine();
+            }
+            inline void await_resume() const noexcept {}
+        };
+        return promise_awaiter {};
+    }
+
+    inline void return_void() const noexcept {}
+
+    inline void unhandled_exception() const noexcept {};
+};
+
+template<typename _Fn>
+psa::futures::result<none_type, int> pooled::spawn(size_t count, _Fn && fn) noexcept {
+    using result_type = std::invoke_result_t<_Fn>;
+    std::list<result_type> pending;
+    for (auto n = 0ul; n < count; ++n) {
+        _Fn instance = fn;
+        pending.emplace_back(instance());
+    }
+    for (auto & future : pending) {
+        co_await future;
+    }
+    co_return psa::result<none_type, int>::ok<>();
+}
+
+}}
+
+#endif
+
+#endif

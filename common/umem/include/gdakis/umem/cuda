@@ -1,0 +1,118 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_CUDA
+#define GDAKIS_UMEM_CUDA
+
+#include <gdakis/umem/dma>
+#include <gdakis/umem/impl/types>
+
+#if __has_include(<cuda_runtime_api.h>) or defined(__DOXYGEN__)
+
+#  include <cuda.h>
+#  include <cuda_runtime_api.h>
+
+#endif
+
+//! @file gdakis/umem/cuda
+
+namespace gdakis::umem {
+
+#if __has_include(<cuda_runtime_api.h>) or defined(__DOXYGEN__)
+
+//! @brief Allocator for CUDA memory
+class cuda {
+public:
+    //! @brief Pointer type returned by this allocator
+    using ptr_type = umem::ptr_type<void>;
+
+    //! @brief Pointer type returned by this allocator
+    //! @brief _Tp Type of the DMA buffer
+    template<typename _Tp>
+    using dma_buffer_type = umem::buffer<_Tp>;
+
+    //! @brief Check if a DMA allocations can be transformed into dma-buf
+    //! @return Whether DMA allocations can be transformed into a dma-buf
+    static bool supports_dma_buf_from_driver() noexcept;
+
+    //! @brief Page size (in bytes) for CUDA allocations
+    static ssize_t get_page_size() noexcept;
+
+    //! @brief Allocate CUDA memory
+    //! @param size Size (in bytes) of the memory to allocate
+    //! @return Pointer to the allocated memory or nullptr
+    static ptr_type alloc(std::size_t size) noexcept;
+
+    //! @brief Allocate CUDA system (CPU) memory
+    //! @param size Size (in bytes) of the memory to allocate
+    //! @return Pointer to the allocated memory or nullptr
+    static ptr_type alloc_system(std::size_t size) noexcept;
+
+    //! @brief Allocate CUDA memory that shared across child processes
+    //!
+    //! CUDA memory cannot be shared across child processes because CUDA does not support calls to `fork()`
+    //!
+    //! @param size Size (in bytes) of the memory to allocate
+    //! @return nullptr
+    static ptr_type alloc_pages_shared(std::size_t size) noexcept;
+
+    //! @brief Allocates a GPU memory buffer suitable as DMA target
+    //! @brief _Tp Type of the DMA buffer
+    //! @param size Size (in bytes) of the memory to allocate
+    template<typename _Tp>
+    static dma_buffer_type<_Tp> alloc_dma_buffer(std::size_t size) noexcept;
+
+#  if defined(__CUDACC__)
+    //! @brief Calls the constructor of an object on the GPU
+    //! @tparam _Tp Type of the object
+    //! @tparam ...Args Type of the arguments passed to the constructor
+    //! @param addr Memory address where the object being initialized resides
+    //! @param ...args Arguments to pass to the constructor
+    //! @return True if the call succeeded
+    template<typename _Tp, typename... Args>
+    static bool call_constructor(void * addr, Args &&... args) noexcept;
+
+    //! @brief Calls the destructor of an object on the GPU
+    //! @tparam _Tp Type of the object
+    //! @param addr Memory address where the object being initialized resides
+    //! @param ...args Arguments to pass to the constructor
+    template<typename _Tp>
+    static void call_destructor(void *) noexcept;
+
+    //! @brief Executes an operation for each CUDA object in an array
+    //! @tparam _Tp Type of the object
+    //! @tparam _Fn Functor type of the operation
+    //! @param addr Memory address where the object array resides
+    //! @param size Number of objects in the array
+    //! @param fn Functor implementing the operation to execute
+    //! @return True if the call succeeded
+    template<typename _Tp, typename _Fn>
+    static bool call_map(_Tp *, std::size_t, _Fn &&) noexcept;
+#  endif
+
+    //! @brief Initializes CUDA memory
+    //! @param addr Memory address to initialize
+    //! @param value Value to set each byte in the memory to
+    //! @param size Size (in bytes) of the memory to initialize
+    static void memset(void * addr, int value, std::size_t size) noexcept;
+
+    //! @brief Copies a CUDA memory region to another CUDA memory region
+    //! @param dst Memory address of the destination memory region
+    //! @param src Memory address of the source memory region
+    //! @param size Size (in bytes) of the memory to initialize
+    static void memcpy(void * dst, const void * src, std::size_t size) noexcept;
+
+    //! @brief Gets the cuda stream used for async CUDA calls in umem
+    //! @return cudastream used by umem
+    static cudaStream_t get_stream() noexcept;
+};
+
+#endif
+
+}
+
+#include "impl/cuda"
+
+#endif

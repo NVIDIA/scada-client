@@ -1,0 +1,207 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_MEM_H_
+#define GDAKIS_UMEM_MEM_H_
+
+#include <gdakis/umem/dma>
+#include <gdakis/umem/impl/types>
+
+#include <bitset>
+#include <functional>
+#include <memory>
+
+//! @file gdakis/umem/mem
+
+namespace gdakis::umem {
+
+//! @brief Allocator class for single objects
+//!
+//! This class implements the allocation API for all memory types and
+//! returns generic pointer types that do not depend on the memory type
+//! where the object is allocated
+//! @tparam _Type Memory type to allocate from
+//! @tparam _Tp Object type to allocate
+template<typename _Type, typename _Tp>
+class mem {
+private:
+    using ptr_type = umem::ptr_type<_Tp>;
+    using __ptr_type = typename _Type::ptr_type;
+
+    template<typename _Fn, typename... Args>
+    static ptr_type __alloc_notify(_Fn &&, __ptr_type &&, Args &&...);
+
+public:
+    //! @brief Allocates an object of type ``_Tp`` on a memory of type ``_Type``
+    //!
+    //! @param args Arguments to pass to the constructor of object
+    //! @return Unique pointer to the object
+    template<typename... Args>
+    static ptr_type alloc(Args &&... args);
+
+    //! @brief Allocates and object of type ``_Tp`` on a memory of type ``_Type`,
+    //! and executes a callable object of type ``_Fn`` upon destruction of the object
+    //!
+    //! @param fn Callable object to call upon destruction. This callable object MUST
+    //! take a pointer to ``_Tp`` as only parameter
+    //! @param args Arguments to pass to the constructor of object
+    //! @return Unique pointer to the object
+    template<typename _Fn, typename... Args>
+    static ptr_type alloc_notify(_Fn && fn, Args &&... args);
+
+    //! @brief Allocates an object of type ``_Tp`` on the system memory associate
+    //! to memory type ``_Type``
+    //! @param args Arguments to pass to the constructor of object
+    //! @return Unique pointer to the object
+    template<typename... Args>
+    static ptr_type alloc_system(Args &&... args);
+};
+
+//! @brief Allocator class for object arrays
+//!
+//! This class implements the allocation API for all memory types and
+//! returns generic pointer types that do not depend on the memory type
+//! where the object is allocated
+//! @tparam _Type Memory type to allocate from
+//! @tparam _Tp Object type to allocate
+template<typename _Type, typename _Tp>
+class mem<_Type, _Tp[]> {
+private:
+    using ptr_type = umem::ptr_type<_Tp>;
+    using __ptr_type = typename _Type::ptr_type;
+    using dma_buffer_type = typename _Type::template dma_buffer_type<_Tp>;
+
+    template<typename _Fn>
+    static ptr_type __alloc(__ptr_type &&, std::size_t, _Fn &&);
+
+    static ptr_type __alloc(__ptr_type &&, std::size_t, std::nullptr_t);
+
+public:
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp``
+    //!
+    //! This function does not call the constructor of the allocated objects,
+    //! but invokes the callable object ``fn`` passing the index and pointer to the
+    //! object for each allocated object.
+    //!
+    //! The invocable object ``fn`` must provide an implementation capable of running
+    //! on the device associated to the memory
+    //! @param n Number of objects to allocated
+    //! @param fn Callable object with signature ``(void)(std::size_t, _Tp *)`` that is
+    //! called for each allocated object. There is no ordering guarantees for invocations
+    //! to this callable
+    //! @returns Pointer to the first allocated object
+    template<typename _Fn>
+    static ptr_type alloc(std::size_t n, _Fn && fn);
+
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp``
+    //!
+    //! This function does not call the constructor of the allocated objects.
+    //!
+    //! @param n Number of objects to allocated
+    //! @returns Pointer to the first allocated object
+    static ptr_type alloc(std::size_t n);
+
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp`` on system accessible memory
+    //!
+    //! This function does not call the constructor of the allocated objects,
+    //! but invokes the callable object ``fn`` passing the index and pointer to the
+    //! object for each allocated object.
+    //!
+    //! The invocable object ``fn`` must provide an implementation capable of running
+    //! on the device associated to the memory
+    //! @param n Number of objects to allocated
+    //! @param fn Callable object with signature ``(void)(std::size_t, _Tp *)`` that is
+    //! called for each allocated object. There is no ordering guarantees for invocations
+    //! to this callable
+    //! @returns Pointer to the first allocated object
+    template<typename _Fn>
+    static ptr_type alloc_system(std::size_t n, _Fn && fn);
+
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp`` on system accessible memory
+    //!
+    //! This function does not call the constructor of the allocated objects.
+    //!
+    //! @param size Number of objects to allocated
+    //! @returns Pointer to the first allocated object
+    static ptr_type alloc_system(std::size_t size);
+
+    //! @brief Computes the number of memory pages a allocation of ``n`` objects will consume
+    //!
+    //! @param size Number of objects being allocated
+    //! @returns Number of memory pages consumed by such an allocation
+    static std::size_t alloc_pages_size(std::size_t size);
+
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp`` on DMA-capable memory
+    //!
+    //! This function does not call the constructor of the allocated objects,
+    //! but invokes the callable object ``fn`` passing the index and pointer to the
+    //! object for each allocated object.
+    //!
+    //! The invocable object ``fn`` must provide an implementation capable of running
+    //! on the device associated to the memory
+    //! @param n Number of objects to allocated
+    //! @param fn Callable object with signature ``(void)(std::size_t, _Tp *)`` that is
+    //! called for each allocated object. There is no ordering guarantees for invocations
+    //! to this callable
+    //! @returns DMA buffer containing the allocated objects
+    template<typename _Fn, typename = decltype(std::declval<_Fn>()(0, reinterpret_cast<_Tp *>(0)))>
+    static dma_buffer_type alloc_dma_buffer(std::size_t n, _Fn && fn);
+
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp`` on DMA-capable memory
+    //!
+    //! This function does not call the constructor of the allocated objects.
+    //!
+    //! @param n Number of objects to allocated
+    //! @returns DMA buffer containing the allocated objects
+    static dma_buffer_type alloc_dma_buffer(std::size_t n);
+
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp`` on memory
+    //! that can be shared across processes
+    //!
+    //! This function does not call the constructor of the allocated objects,
+    //! but invokes the callable object ``fn`` passing the index and pointer to the
+    //! object for each allocated object.
+    //!
+    //! The invocable object ``fn`` must provide an implementation capable of running
+    //! on the device associated to the memory
+    //! @param n Number of objects to allocated
+    //! @param fn Callable object with signature ``(void)(std::size_t, _Tp *)`` that is
+    //! called for each allocated object. There is no ordering guarantees for invocations
+    //! to this callable
+    //! @returns Pointer to the first allocated object
+    template<typename _Fn>
+    static ptr_type alloc_pages_shared(std::size_t n, _Fn && fn);
+
+    //! @brief Allocates an array of ``n`` contiguous objects of type ``_Tp``on memory
+    //! that can be shared across processes
+    //!
+    //! This function does not call the constructor of the allocated objects.
+    //!
+    //! @param n Number of objects to allocated
+    //! @returns Pointer to the first allocated object
+    static ptr_type alloc_pages_shared(std::size_t n);
+};
+
+//! @brief Initializes an array of objects of type ``_Tp`` to a predefined constant value
+//!
+//! @param ptr Pointer to the beginning of the object array
+//! @param c   Constant value to initialize the memory to
+//! @param n   Size (in bytes) of the memory to initialize
+template<typename _Type, typename _Tp>
+void memset(const umem::ptr_type<_Tp> & ptr, int c, std::size_t n);
+
+//! @brief Copies a sequence of ``n` objects of type ``_Tp`` to an array of objects of the same type
+//!
+//! @param dst Pointer to the beginning of the object array
+//! @param src Raw pointer to the sequence of objects to copy from
+//! @param size Size (in bytes) of the memory to copy
+template<typename _Type, typename _Tp>
+void memcpy(const umem::ptr_type<_Tp> & dst, const _Tp * src, std::size_t size);
+
+}
+
+#include "impl/mem"
+
+#endif

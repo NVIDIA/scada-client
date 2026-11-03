@@ -1,0 +1,68 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_IMPL_PROTOCOL
+#define GDAKIS_IPC_IMPL_PROTOCOL
+
+#include <gdakis/atomic>
+
+#include <sys/socket.h>
+#include <type_traits>
+
+namespace gdakis::comm::ipc {
+
+namespace detail {
+
+template<typename _Socket, typename _Message, typename = void>
+struct message_sender {
+    inline auto operator()(_Socket & socket, const _Message & msg) const noexcept { return socket.write(msg).sync(); }
+};
+
+template<typename _Socket, typename _Message>
+struct message_sender<_Socket, _Message, std::enable_if_t<!std::is_empty_v<typename _Message::ancillary_type>>> {
+    inline auto operator()(_Socket & socket, const _Message & msg) const noexcept {
+        return socket.send_file_descriptor_array(msg.ancillary(), msg);
+    }
+};
+
+template<device_type>
+struct __barrier_selector;
+
+template<>
+struct __barrier_selector<device_type::cpu> {
+    using type = mpbar;
+};
+template<>
+struct __barrier_selector<device_type::cuda> {
+    using type = spinbar<thread_scope_device>;
+};
+
+}
+
+template<>
+struct request_buffer_control<device_type::cpu> {
+    using barrier_type = typename detail::__barrier_selector<device_type::cpu>::type;
+    barrier_type ready_;
+    std::uint32_t count_;
+
+    inline request_buffer_control() noexcept : ready_(2), count_(0) {}
+};
+
+template<>
+struct request_buffer_control<device_type::cuda> {
+    using barrier_type = typename detail::__barrier_selector<device_type::cuda>::type;
+    barrier_type ready_;
+    std::uint32_t count_;
+
+    __host__ __device__ inline request_buffer_control() noexcept : ready_(2), count_(0) {}
+};
+
+template<typename _Socket, typename _Message>
+auto send_to_server(_Socket & socket, const _Message & msg) noexcept {
+    return detail::message_sender<_Socket, _Message>()(socket, msg);
+}
+
+}
+
+#endif

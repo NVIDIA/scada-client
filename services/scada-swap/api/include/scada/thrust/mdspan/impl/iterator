@@ -1,0 +1,44 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_THRUST___MDSPAN_IMPL_ITERATOR
+#define SCADA_THRUST___MDSPAN_IMPL_ITERATOR
+
+SCADA_THRUST_SIMPLE_NS {
+namespace mdspan {
+SCADA_THRUST_UNIT(iterator) {
+
+// TODO: WAR for nvcc to work without a __builtin_is_empty.
+// after fix:
+// base_iterator(span, index)
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::iterator(span_type & span, const index_type & index) noexcept
+    : base_iterator(index, span) {}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+inline iterator<_Tp, _Index, _Extent, _Layout, _Accessor>::iterator(base_iterator && other) noexcept
+    : base_iterator(std::move(other)) {}
+
+}}
+
+SCADA_THRUST_UNIT(iterator) {
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+static inline mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> begin(
+    ::cuda::std::mdspan<_Tp, ::cuda::std::extents<_Index, _Extent>, _Layout, _Accessor> & span) noexcept {
+    return mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor>(span, 0);
+}
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+static inline mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> end(
+    ::cuda::std::mdspan<_Tp, ::cuda::std::extents<_Index, _Extent>, _Layout, _Accessor> & span) noexcept {
+    return mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor>(span, span.size());
+}
+
+}
+
+}
+
+#endif

@@ -1,0 +1,34 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP___IMPL_REFERENCE
+#define SCADA_SWAP___IMPL_REFERENCE
+
+#include <scada/swap/portal>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(reference) {
+
+template<typename _Portal>
+inline constexpr __host__ __device__ reference_type<_Portal>::reference_type(
+    portal_type * portal, const index_type index) noexcept
+    : portal_(portal),
+      index_(index) {}
+
+template<typename _Portal>
+inline constexpr __host__ __device__ reference_type<_Portal>::operator value_type() const noexcept {
+    return portal_->get(index_).take_ok();
+}
+
+template<typename _Portal>
+inline constexpr __host__ __device__ reference_type<_Portal> reference_type<_Portal>::operator=(
+    const value_type & value) const noexcept {
+    portal_->put(index_, value);
+    return *this;
+}
+
+}}
+
+#endif

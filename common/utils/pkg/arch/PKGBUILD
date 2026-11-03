@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+pkgname='gdakis-utils-dev'
+pkgdesc='GDAKIS Utils'
+arch=('x86_64')
+pkgver=1.0.0
+pkgrel=1
+
+depends=('gdakis-umem-dev=1.0.0')
+
+source=('git+https://github.com/NVIDIA/scada-client.git')
+sha256sums=('SKIP')
+
+prepare() {
+    cmake -B build -S scada-client/common/utils \
+    -DGDAKIS_UTILS_BUILD_TESTS=BOOL:ON \
+    -DGDAKIS_UTILS_BUILD_DOCS=BOOL:ON \
+    -DCMAKE_BUILD_TYPE='Release' \
+    -DCMAKE_INSTALL_PREFIX='/usr' \
+    -Wno-dev
+}
+
+build() {
+   cmake --build build -j`nproc`
+}
+
+check() {
+    ctest --test-dir build --output-on-failure
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+}

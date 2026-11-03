@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[repo]
+logging = "warn"
+
+
+[repo_docs]
+enabled = true
+project = "scada-core"
+name = "SCADA Core Library"
+version = "@PROJECT_VERSION@"
+copyright_start = 2022
+
+docs_root = "docs"
+logo = "images/NVIDIA_logo.png"
+
+sphinx_conf_py_extra = """
+    numfig = True
+"""
+
+only_preprocessor_enabled = true
+
+doxygen_input = [
+    "@CMAKE_SOURCE_DIR@/include/scada/*",
+]
+doxygen_dst = "@PROJECT_BINARY_DIR@/tmp"
+doxygen_strip_from_path = [
+    "@PROJECT_SOURCE_DIR@/include"
+]
+doxygen_conf_extra = """
+   SEARCH_INCLUDES = YES
+   EXTENSION_MAPPING = "no_extension=C++"
+   INCLUDE_PATH = @CMAKE_SOURCE_DIR@/include
+   PREDEFINED = __DOXYGEN__
+"""
+
+api_title = "GDAKIS Utils"
+api_output_directory = "docs/_build/api"
+api_item_filters = [
+    { rule = "exclude", attribute = "protection",   matching = "protected"},
+    { rule = "exclude", attribute = "kind",         matching = "file"},
+    { rule = "exclude", attribute = "kind",         matching = "dir"},
+    { rule = "exclude", attribute = "kind",         matching = "define"},
+]
+api_root_page = {}
+api_toc_pages = [
+   {docname = "namespaces", title = "Namespace", kinds = ["namespace"]},
+   {docname = "classes", title = "Class List", kinds = ["class"]},
+]

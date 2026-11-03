@@ -1,0 +1,121 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_BARRIER
+#define GDAKIS_BARRIER
+
+#include <gdakis/__utils_version>
+#include <version>
+
+//! @file gdakis/barrier
+
+#if defined(__cpp_lib_barrier)
+
+#  include <barrier>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(barrier) {
+
+using barrier = std::barrier<>;
+
+}}
+
+#else
+
+#  include <condition_variable>
+#  include <functional>
+#  include <mutex>
+
+#  include <cstddef>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(barrier) {
+
+//! @brief Barrier implementation to use when std::barrier is not present
+class barrier {
+public:
+    //! @brief Type that defines an arrival token that can be used later to wait for the barrier
+    using arrival_token = std::ptrdiff_t;
+
+protected:
+    //! @brief Mutex to prevent races updating/reading the internal barrier attributes
+    mutable std::mutex mutex_;
+    //! @brief Condition variable to notify the threads waiting on the barrier
+    mutable std::condition_variable cv_;
+
+    //! @brief Number of threads expected to arrive to the barrier
+    std::size_t expected_;
+    //! @brief Number of threads pending to arrive to the barrier on a given epoch
+    std::ptrdiff_t pending_;
+    //! @brief Epoch tracking to prevent re-entry into the barrier until all threads clear
+    std::ptrdiff_t phase_;
+
+    //! @brief Function to execute upon completion of the barrier
+    std::function<void(void)> completion_;
+
+    //! @brief Internal type to use as default completion operation
+    struct noop {
+        //! @brief Call operator
+        void operator()() const noexcept;
+    };
+
+    //! @brief Arrive to the barrier
+    //! @tparam _Lock Lock guard type to hold while arriving
+    //! @param n Number of threads arriving to the barrier
+    //! @param guard Lock guard to hold while arriving to the barrier
+    //! @return Arrival token that can be used to wait for the barrier
+    template<typename _Lock>
+    arrival_token __arrive(std::ptrdiff_t n, _Lock && guard);
+
+    //! @brief Wait for a barrier using an arrival token returned by a previous arrive operation
+    //! @tparam _Lock Lock guard type to hold while waiting on the barrier
+    //! @param token Arrival token
+    //! @param guard Lock guard to hold while waiting for the barrier
+    template<typename _Lock>
+    void __wait(arrival_token && token, _Lock && guard) const;
+
+public:
+    //! @brief Constructor that accepts a completion function
+    //! @tparam _CompletionFunction Type for the completion function. Defaults to a no operation
+    //! @param expected Number of threads expected on the barrier
+    //! @param f Completion function
+    template<typename _CompletionFunction = noop>
+    barrier(std::ptrdiff_t expected, _CompletionFunction f = _CompletionFunction());
+
+    //! @brief Deleted copy constructor
+    barrier(const barrier &) = delete;
+
+    //! @brief Deleted copy assignment operator
+    barrier & operator=(const barrier &) = delete;
+
+    //! @brief Arrive to the barrier
+    //! @param count Number of threads arriving to the barrier
+    //! @returns Arrival token that can be used to wait for the barrier
+    arrival_token arrive(std::ptrdiff_t count = 1);
+
+    //! @brief Wait on the barrier
+    //! @param token Arrival token returned by the wait operation
+    void wait(arrival_token && token) const;
+
+    //! @brief Arrive to the barrier and wait until it clears
+    void arrive_and_wait();
+
+    //! @brief Arrive to the barrier and remove the calling thread from the set of expected arrivals
+    void arrive_and_drop();
+
+    //! @brief Return the maximum number of expected threads supported by the barrier
+    //! @returns Maximum number of threads supported
+    static constexpr std::ptrdiff_t max() noexcept;
+};
+
+}}
+
+#  include "impl/barrier"
+
+#endif
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, barrier)
+
+#endif

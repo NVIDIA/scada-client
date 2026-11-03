@@ -1,0 +1,241 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_BUFFER
+#define GDAKIS_BUFFER
+
+#include <gdakis/atomic>
+#include <gdakis/bits>
+#include <gdakis/cuda/regs>
+#include <gdakis/cuda/warp>
+#include <gdakis/thread>
+
+#if defined(__CUDACC__)
+#  include <cooperative_groups.h>
+#endif
+
+#if defined(__CPU_PRINT__)
+#  include <iostream>
+#  include <sstream>
+#endif
+
+namespace gdakis::comm {
+
+template<typename, thread_scope>
+struct buffer_test_access;
+
+template<typename T, thread_scope _Sco = thread_scope_device>
+class buffer {
+private:
+    template<typename, thread_scope>
+    friend struct buffer_test_access;
+
+    static constexpr auto COMMIT_BIT_MASK = 1ULL << 63;
+    static constexpr auto CLOSE_CLAIMED_BIT_MASK = 1ULL << 63;
+    static constexpr auto EPOCH_BITS = 7;
+    static constexpr auto EPOCH_BIT_SHIFT = (63 - EPOCH_BITS);
+    static constexpr auto EPOCH_MASK = ((1ULL << EPOCH_BITS) - 1) << EPOCH_BIT_SHIFT;
+    static constexpr auto COUNT_MASK = ~(COMMIT_BIT_MASK | EPOCH_MASK);
+    // The two sentinels occupy bit 63 in separate atomic words, while close_at_ otherwise shares in_'s encoding.
+    static_assert(COMMIT_BIT_MASK == CLOSE_CLAIMED_BIT_MASK, "in_ and close_at_ sentinel bits must stay aligned");
+
+    atomic<uint64_t, _Sco> in_;
+    atomic<unsigned, _Sco> out_;
+    T buffer_; // The actual buffer storage
+    atomic<uint64_t, _Sco> close_at_ { CLOSE_CLAIMED_BIT_MASK }; // Kept last to preserve hot-field offsets.
+
+public:
+    static constexpr unsigned get_epoch(uint64_t data) noexcept { return (data & EPOCH_MASK) >> EPOCH_BIT_SHIFT; }
+    inline buffer() = default;
+
+    inline __host__ __device__ buffer(T && store) : in_(0), out_(0), buffer_(std::move(store)) {}
+
+    inline __host__ __device__ bool try_enter(unsigned & position, unsigned & epoch) {
+#if defined(__CUDA_ARCH__)
+        auto active_threads_group = cooperative_groups::coalesced_threads();
+        auto active_group
+            = cooperative_groups::labeled_partition(active_threads_group, reinterpret_cast<std::intptr_t>(this));
+        auto group_size = active_group.num_threads();
+        auto in_count = cooperative_groups::invoke_one_broadcast(
+            active_group, [this, group_size] { return in_.fetch_add(group_size, memory_order_acquire); });
+
+        if (in_count & COMMIT_BIT_MASK) {
+            return false;
+        }
+        epoch = get_epoch(in_count);
+        position = (in_count & COUNT_MASK) + active_group.thread_rank();
+        return position < size();
+#else
+        auto new_in = in_.fetch_add(1, memory_order_acquire);
+
+        if ((new_in & COMMIT_BIT_MASK) != 0) {
+            return false;
+        }
+
+        position = new_in & ~EPOCH_MASK;
+        epoch = get_epoch(new_in);
+        return position < size();
+#endif
+    }
+
+    inline __host__ __device__ void exit_impl(unsigned count, unsigned epoch) {
+        auto out_count = out_.fetch_add(count, memory_order_release) + count;
+        assert(out_count <= size());
+
+        auto in_count = in_.load(memory_order_acquire);
+        finish_exit(out_count, epoch, in_count);
+    }
+
+    inline __host__ __device__ void exit(unsigned epoch) {
+#if defined(__CUDA_ARCH__)
+        auto active_threads_group = cooperative_groups::coalesced_threads();
+        auto active_group
+            = cooperative_groups::labeled_partition(active_threads_group, reinterpret_cast<std::intptr_t>(this));
+        exit_group(active_group, epoch);
+#else
+        exit_impl(1, epoch);
+#endif
+    }
+#if defined(__CUDACC__)
+    // Thread group operations
+    template<typename _Cg>
+    inline __device__ bool try_enter_group(const _Cg & group, unsigned & position, unsigned & epoch) {
+        auto group_size = group.num_threads();
+        auto in_count = cooperative_groups::invoke_one_broadcast(
+            group, [this, group_size] { return in_.fetch_add(group_size, memory_order_acquire); });
+
+        if (in_count & COMMIT_BIT_MASK) {
+            return false;
+        }
+        auto count = in_count & COUNT_MASK;
+        auto capacity = static_cast<uint64_t>(size());
+        if (count + group_size > capacity) {
+            if (count < capacity) [[unlikely]] {
+                cooperative_groups::invoke_one(group, [this, in_count] { this->publish_close(in_count); });
+            }
+            return false;
+        }
+
+        epoch = get_epoch(in_count);
+        position = count + group.thread_rank();
+        return true;
+    }
+
+    template<typename _Cg>
+    inline __device__ void exit_group(const _Cg & group, unsigned epoch) {
+        auto group_size = group.num_threads();
+        cooperative_groups::invoke_one(group, [this, group_size, epoch] { this->exit_impl(group_size, epoch); });
+    }
+#endif
+
+    template<typename Arg>
+    __host__ __device__ inline void set(unsigned pos, Arg && arg) {
+        buffer_.set(pos, std::forward<Arg>(arg));
+    }
+
+    __host__ __device__ inline constexpr auto size() const { return buffer_.size(); }
+
+    __host__ __device__ inline void reset(unsigned epoch) {
+        out_.store(0, memory_order_relaxed);
+        in_.store(((epoch + 1ULL) << EPOCH_BIT_SHIFT) & EPOCH_MASK, memory_order_release);
+    }
+
+    __host__ __device__ inline void commit(unsigned count) { buffer_.commit(count); }
+
+    __host__ __device__ inline void acquire() { buffer_.acquire(); }
+
+private:
+    __host__ __device__ inline void finish_exit(unsigned out_count, unsigned epoch, uint64_t in_count) {
+        if (epoch != get_epoch(in_count)) {
+            return; //our buffer was already committed
+        }
+        auto input_count = in_count & COUNT_MASK;
+
+        if (out_count > input_count || (input_count > size() && (in_count & COMMIT_BIT_MASK) == 0)) [[unlikely]] {
+            // The first snapshot may predate completed reservations or the close publication. This acquire reads
+            // our release RMW (or a later value) from out_'s release sequence. If the closer preceded us in out_'s
+            // modification order, its close publication now happens-before the following re-read of in_. If it did
+            // not, the closer's own RMW will observe our completion and is responsible for finalization.
+            [[maybe_unused]] auto synchronized_out = out_.load(memory_order_acquire);
+            in_count = in_.load(memory_order_relaxed);
+
+            if (epoch != get_epoch(in_count)) {
+                return;
+            }
+            input_count = in_count & COUNT_MASK;
+        }
+
+        assert(out_count <= input_count);
+        bool buffer_full = (out_count == size());
+
+        if (std::min(input_count, static_cast<unsigned long long>(size())) != out_count) {
+            if ((in_count & COMMIT_BIT_MASK) != 0 && input_count > size()) [[unlikely]] {
+                try_finalize_close(out_count, epoch);
+            }
+            return;
+        }
+
+        if (buffer_full) {
+            [[maybe_unused]] auto prev_in = in_.fetch_or(COMMIT_BIT_MASK, memory_order_release);
+            assert((prev_in & COMMIT_BIT_MASK) == 0);
+            assert(input_count <= (prev_in & COUNT_MASK));
+            assert(get_epoch(prev_in) == epoch);
+            process_and_reset_buffer(out_count, epoch);
+        } else {
+            if (in_.compare_exchange_strong(
+                    in_count, in_count | COMMIT_BIT_MASK, memory_order_release, memory_order_relaxed)) {
+                process_and_reset_buffer(out_count, epoch);
+            } else {
+                // A failed CAS can be the first observation of a concurrently published group-close record.
+                [[maybe_unused]] auto synchronized_out = out_.load(memory_order_acquire);
+                in_count = in_.load(memory_order_relaxed);
+                if (epoch == get_epoch(in_count) && (in_count & COMMIT_BIT_MASK) != 0
+                    && (in_count & COUNT_MASK) > size()) [[unlikely]] {
+                    try_finalize_close(out_count, epoch);
+                }
+            }
+        }
+    }
+#if defined(__CUDACC__)
+    __device__ inline void publish_close(uint64_t in_count) {
+        // The release update to in_ publishes this boundary to exiting groups.
+        close_at_.store(in_count, memory_order_relaxed);
+        // Reservation bases increase monotonically, so only the first straddling group can start below capacity and
+        // reach this publication in an epoch.
+        [[maybe_unused]] auto prev_in = in_.fetch_or(COMMIT_BIT_MASK, memory_order_release);
+        assert((prev_in & COMMIT_BIT_MASK) == 0);
+        assert(get_epoch(prev_in) == get_epoch(in_count));
+        // A release zero-add RMW reads the immediately preceding value in out_'s modification order. It cannot skip
+        // an earlier exit, and a later exit can acquire its release sequence before rechecking the close publication.
+        try_finalize_close(out_.fetch_add(0, memory_order_release), get_epoch(in_count));
+    }
+#endif
+
+    __host__ __device__ inline void try_finalize_close(unsigned out_count, unsigned epoch) {
+        auto close_at = close_at_.load(memory_order_relaxed);
+        if ((close_at & CLOSE_CLAIMED_BIT_MASK) != 0 || get_epoch(close_at) != epoch
+            || (close_at & COUNT_MASK) != out_count) {
+            return;
+        }
+
+        if (close_at_.compare_exchange_strong(
+                close_at, close_at | CLOSE_CLAIMED_BIT_MASK, memory_order_relaxed, memory_order_relaxed)) {
+            process_and_reset_buffer(out_count, epoch);
+        }
+    }
+
+    __host__ __device__ inline void process_and_reset_buffer(unsigned count, unsigned epoch) {
+        // Every producer publishes its entry writes through a release RMW on out_. Acquire the completed release
+        // sequence before commit() publishes the batch, so the consumer observes the entire committed prefix.
+        [[maybe_unused]] auto completed = out_.load(memory_order_acquire);
+        assert(completed == count);
+
+        commit(count);
+        acquire();
+        reset(epoch);
+    }
+};
+}
+#endif // GDAKIS_BUFFER

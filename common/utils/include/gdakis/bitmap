@@ -1,0 +1,269 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_BITMAP
+#define GDAKIS_BITMAP
+
+#include <type_traits>
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+
+#include <gdakis/atomic>
+#include <gdakis/log2>
+
+//! @file gdakis/bitmap
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(bitmap) {
+
+//! @brief A bitmap that can be embedded within another type as its last attribute
+//! @tparam _Tp Type to hold the bitmap value
+//! @tparam _Sco Synchronization scope for the bitmap
+template<typename _Tp = std::uint32_t, thread_scope _Sco = thread_scope_system,
+    typename = typename std::enable_if<std::is_class<atomic<_Tp, _Sco>>::value>::type>
+class embedded_bitmap {
+public:
+    //! @brief Number of bits in the type holding the bitmap values
+    static constexpr std::uint8_t bits_per_word = sizeof(_Tp) << 3;
+    //! @brief Number of bits to shift a bitmap index to obtain the word holding its value
+    static constexpr unsigned word_shift = static_log2<bits_per_word>::value;
+
+protected:
+    //! @brief Default constructor
+    __host__ __device__ embedded_bitmap() {};
+
+    //! @brief Default destructor
+    __host__ __device__ ~embedded_bitmap() {};
+
+public:
+    //! @brief Alias to export the type holding the bitmap values
+    using word = _Tp;
+    //! @brief Alias to export the type of the bitmap when embedded into another type
+    using type = _Tp[];
+    //! @brief Alias to export the pointer type to access the values of the bitmap
+    using ptr = _Tp *;
+
+    //! @brief Get the number of words required in the bitmap to support a given number of elements
+    //! @param length Number of elements supported by the bitmap
+    //! @return Number of words required by the bitmap to support all the elements
+    __host__ __device__ static inline constexpr std::size_t word_count(std::size_t length) noexcept;
+
+    //! @brief Get the number of bytes required in the bitmap to support a given number of elements
+    //! @param length Number of elements supported by the bitmap
+    //! @return Number of bytes required by the bitmap to support all the elements
+    __host__ __device__ static inline constexpr std::size_t memory_size(std::size_t length) noexcept;
+
+    //! @brief  Set a bit at a given position
+    //! @param data Bitmap to set the bit into
+    //! @param pos Position of the bit to set
+    //! @param mem_order Memory order required
+    //! @return True if the position was clear, false if the position was already set
+    __host__ __device__ static inline bool set(type data, std::size_t pos, memory_order mem_order) noexcept;
+
+    //! @brief  Set a bit range at a given positions
+    //!
+    //! If the bit range specified spans more than one word, this operation sets the
+    //! bits starting with the word at the lowest position
+    //!
+    //! @param data Bitmap to set the bit into
+    //! @param start Position of the first bit to set
+    //! @param end Position of the last bit to set
+    //! @param mem_order Memory order required
+    //! @return Number of bits set that were clear
+    __host__ __device__ static inline std::size_t set(
+        type data, std::size_t start, std::size_t end, memory_order mem_order) noexcept;
+
+    //! @brief  Set a bit range at a given positions in reverse order
+    //!
+    //! If the bit range specified spans more than one word, this operation sets the
+    //! bits starting with the word at the greatest position
+    //!
+    //! @param data Bitmap to set the bit into
+    //! @param start Position of the first bit to set
+    //! @param end Position of the last bit to set
+    //! @param mem_order Memory order required
+    //! @return Number of bits set that were clear
+    __host__ __device__ static inline std::size_t rset(
+        type data, std::size_t start, std::size_t end, memory_order mem_order) noexcept;
+
+    //! @brief  Clear a bit at a given position
+    //! @param data Bitmap to clear the bit from
+    //! @param pos Position of the bit to clear
+    //! @param mem_order Memory order required
+    //! @return True if the position was set, false if the position was already clear
+    __host__ __device__ static inline bool clear(type data, std::size_t pos, memory_order mem_order) noexcept;
+
+    //! @brief  Clear a bit range at a given positions
+    //!
+    //! If the bit range specified spans more than one word, this operation clears the
+    //! bits starting with the word at the lowest position
+    //!
+    //! @param data Bitmap to clear the bit into
+    //! @param start Position of the first bit to clear
+    //! @param end Position of the first last to clear
+    //! @param mem_order Memory order required
+    //! @return Number of bits cleared that were set
+    __host__ __device__ static inline std::size_t clear(
+        type data, std::size_t start, std::size_t end, memory_order mem_order) noexcept;
+
+    //! @brief Check if bit at a given position is set
+    //! @param data Bitmap to check the bit from
+    //! @param pos Position of the bit to check
+    //! @param mem_order Memory order required
+    //! @return True if the position is set, false if the position is clear
+    __host__ __device__ static inline bool check(type data, std::size_t pos, memory_order mem_order) noexcept;
+
+    //! @brief Check if bit range at a given positions is set
+    //! @param data Bitmap to check the bits from
+    //! @param start Position of the first bit to check
+    //! @param end Position of the last bit to check
+    //! @param mem_order Memory order required
+    //! @return True if all the bits are set, false otherwise
+    __host__ __device__ static inline bool check(
+        type data, std::size_t start, std::size_t end, memory_order mem_order) noexcept;
+};
+
+//! @brief Bitmap type that can be a free standing object
+//! @tparam _Tp Type to hold the bitmap value
+//! @tparam _Sco Synchronization scope for the bitmap
+template<typename _Tp = std::uint32_t, thread_scope _Sco = thread_scope_system,
+    typename = typename std::enable_if<std::is_class<atomic<_Tp, _Sco>>::value>::type>
+class static_bitmap : public embedded_bitmap<_Tp, _Sco> {
+protected:
+    //! @brief Base type for this bitmap
+    using base = embedded_bitmap<_Tp, _Sco>;
+    //! @brief Pointer to the base embedded_bitmap
+    typename base::ptr data_;
+
+public:
+    //! @brief Default constructor
+    //! @param num_bits Number of bits in the bitmap
+    static_bitmap(std::size_t num_bits) : data_(new _Tp[base::word_count(num_bits)]()) {}
+
+    //! @brief Default destructor
+    ~static_bitmap() { delete[] data_; }
+
+    //! @brief Set a bit in the bitmap
+    //! @param pos Position of the bit to set
+    //! @param mem_order Memory order required
+    //! @return True if the bit was clear before the operation, false otherwise
+    inline bool set(std::size_t pos, memory_order mem_order) noexcept { return base::set(data_, pos, mem_order); }
+
+    //! @brief Clear a bit in the bitmap
+    //! @param pos Position of the bit to clear
+    //! @param mem_order Memory order required
+    //! @return True if the bit was set before the operation, false otherwise
+    inline bool clear(std::size_t pos, memory_order mem_order) noexcept { return base::clear(data_, pos, mem_order); }
+
+    //! @brief Checks if a bit is set in the bitmap
+    //! @param pos Position of the bit to check
+    //! @param mem_order Memory order required
+    //! @return True if the bit was is set, false otherwise
+    inline bool check(std::size_t pos, memory_order mem_order) noexcept { return base::check(data_, pos, mem_order); }
+};
+
+//! @brief A bitmap type that supports atomic operations
+//! @tparam _Tp Type used to hold the bitmap
+//! @tparam _Sco Synchronization scope for the bitmap
+template<typename _Tp, thread_scope _Sco = thread_scope_device>
+class atomic_bitmap {
+protected:
+    //! @brief Atomic value that holds the bitmap
+    atomic<_Tp, _Sco> value_;
+    //! @brief Maximum number of bits in the bitmap
+    static const size_t MAX_ = (sizeof(_Tp) << 3);
+
+public:
+    //! @brief Default constructor
+    __host__ __device__ inline atomic_bitmap() noexcept;
+
+    //! @brief Get the contents of the bitmap
+    //! @param mem_order Memory order for the operation
+    //! @return Value of the bitmap
+    __host__ __device__ inline _Tp get(memory_order mem_order) const noexcept;
+
+    //! @brief Get value of a bit within the bitmap
+    //! @param n Bit position
+    //! @param mem_order Memory order for the operation
+    //! @return True if the bit is set, false otherwise
+    __host__ __device__ inline bool get(size_t n, memory_order mem_order) const noexcept;
+
+    //! @brief Set a bit within the bitmap
+    //! @param n Bit position
+    //! @param mem_order Memory order for the operation
+    //! @return True if the bit was clear prior the operation, false otherwise
+    __host__ __device__ inline bool set(size_t n, memory_order mem_order) noexcept;
+
+    //! @brief Clear a bit within the bitmap
+    //! @param n Bit position
+    //! @param mem_order Memory order for the operation
+    //! @return True if the bit was set prior the operation, false otherwise
+    __host__ __device__ inline bool clear(size_t n, memory_order mem_order) noexcept;
+
+    //! @brief Count the number of bits set within the bitmap
+    //! @param mem_order Memory order for the operation
+    //! @return Number of bits set in the bitmap
+    __host__ __device__ inline size_t count(memory_order mem_order = memory_order_relaxed) const noexcept;
+
+    //! @brief Find the first bit set within the bitmap
+    //! @param mem_order Memory order for the operation
+    //! @return Position of the first set bit, -1 if all bits are clear
+    __host__ __device__ inline ssize_t find_first_set(memory_order mem_order = memory_order_relaxed) const noexcept;
+
+    //! @brief Find the previous set bit starting at a give position
+    //! @param n Starting bit position
+    //! @param mem_order Memory order for the operation
+    //! @return Bit position of the set bit, -1 if none is set
+    __host__ __device__ inline ssize_t find_previous(
+        size_t n, memory_order mem_order = memory_order_relaxed) const noexcept;
+
+    //! @brief Find the next set bit starting at a give position
+    //! @param n Starting bit position
+    //! @param mem_order Memory order for the operation
+    //! @return Bit position of the set bit, -1 if none is set
+    __host__ __device__ inline ssize_t find_next(
+        size_t n, memory_order mem_order = memory_order_relaxed) const noexcept;
+
+    //! @brief Set the first clear bit and return its position
+    //! @return Position of the bit set, -1 if none was set
+    __host__ __device__ inline ssize_t alloc() noexcept;
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+    //! @brief Warp-collective set a bit within the bitmap
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param n Bit position
+    //! @param mem_order Memory order for the operation
+    //! @return True if the bit was clear prior the operation, false otherwise
+    template<typename _Cg>
+    __device__ inline bool set(const _Cg & g, size_t n, memory_order mem_order) noexcept;
+
+    //! @brief Warp-collective clear a bit within the bitmap
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param n Bit position
+    //! @param mem_order Memory order for the operation
+    //! @return True if the bit was set prior the operation, false otherwise
+    template<typename _Cg>
+    __device__ inline bool clear(const _Cg & g, size_t n, memory_order mem_order) noexcept;
+
+    //! @brief Warp-collective set the first clear bit and return its position
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @param g Cooperative group calling the operation synchronously
+    //! @return Position of the bit set, -1 if none was set
+    template<typename _Cg>
+    __device__ inline ssize_t alloc(const _Cg & g) noexcept;
+
+#endif
+};
+
+}}
+
+#include "impl/bitmap"
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, bitmap)
+
+#endif

@@ -1,0 +1,51 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_MCS
+#define PSA_COAIO_MCS
+
+#include <atomic>
+
+//! @file mcs
+
+namespace psa { namespace coaio {
+
+//! @brief Mellor-Crummey-Scott spinlock
+class mcs {
+public:
+    //! @brief A node in the lock chain
+    class node {
+    protected:
+        mcs & mutex_;
+        std::atomic<node *> next_;
+        std::atomic<bool> locked_;
+
+        friend class mcs;
+
+    public:
+        //! @brief Create a node in a lock chain
+        //! @param lock Lock where to chain the node to
+        node(mcs & lock) noexcept;
+
+        //! @brief Node destructor
+        ~node() noexcept;
+    };
+
+    //! @brief MCS lock constructor
+    mcs() noexcept;
+
+protected:
+    std::atomic<node *> tail_;
+    friend class node;
+
+    void lock(node &) noexcept;
+    void unlock(node &) noexcept;
+};
+
+}}
+
+#include "impl/mcs"
+
+#endif

@@ -1,0 +1,259 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_IMPL_CUDA
+#define GDAKIS_UMEM_IMPL_CUDA
+
+#if __has_include(<cuda_runtime_api.h>)
+#  include <cassert>
+#  include <cuda.h>
+#  include <cuda_runtime_api.h>
+#  include <iomanip>
+#  include <iostream>
+#endif
+
+namespace gdakis::umem {
+
+#if __has_include(<cuda_runtime_api.h>)
+
+inline bool cuda::supports_dma_buf_from_driver() noexcept {
+    cudaError_t cuda_ret;
+    CUresult cu_ret;
+    CUdevice cu_device;
+    int device, attr;
+
+    cuda_ret = cudaGetDevice(&device);
+    if (cuda_ret != cudaSuccess)
+        return false;
+
+    cu_ret = cuDeviceGet(&cu_device, device);
+    if (cu_ret != CUDA_SUCCESS)
+        return false;
+
+    cu_ret = cuDeviceGetAttribute(&attr, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, cu_device);
+    return (cu_ret == CUDA_SUCCESS) and (attr != 0) ? true : false;
+}
+
+inline ssize_t cuda::get_page_size() noexcept {
+    int device;
+    cudaError_t cuda_ret = cudaGetDevice(&device);
+    if (cuda_ret != cudaSuccess)
+        return -EIO;
+
+    std::size_t granularity;
+    CUmemAllocationProp prop = {};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.id = device;
+    prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    CUresult cu_ret = cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+    return cu_ret == CUDA_SUCCESS ? static_cast<ssize_t>(granularity) : -EIO;
+}
+
+inline cuda::ptr_type cuda::alloc(std::size_t size) noexcept {
+    cudaError_t ret;
+    void * p;
+
+    ret = cudaMalloc(&p, size);
+    if (ret != cudaSuccess)
+        return nullptr;
+    return ptr_type(p, [](void * p) { cudaFreeAsync(p, get_stream()); });
+}
+
+inline cuda::ptr_type cuda::alloc_system(std::size_t size) noexcept {
+    cudaError_t ret;
+    void * p;
+
+    ret = cudaHostAlloc(&p, size, cudaHostAllocMapped | cudaHostAllocPortable);
+    if (ret != cudaSuccess)
+        return nullptr;
+    return ptr_type(p, [](void * p) { cudaFreeHost(p); });
+}
+
+inline cuda::ptr_type cuda::alloc_pages_shared(std::size_t) noexcept {
+    return nullptr;
+}
+
+template<typename _Tp>
+inline cuda::dma_buffer_type<_Tp> cuda::alloc_dma_buffer(std::size_t size) noexcept {
+    cudaError_t cuda_ret;
+    CUresult cu_ret;
+    if (supports_dma_buf_from_driver() == false) {
+        std::cerr
+            << "CUDA DMA Buffer allocation failed: GPU does not support DMA-BUF (CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED)"
+            << std::endl;
+        return dma_buffer_type<_Tp>(-ENOSYS);
+    }
+
+    int device;
+    cuda_ret = cudaGetDevice(&device);
+    if (cuda_ret != cudaSuccess) {
+        std::cerr << "CUDA DMA Buffer allocation failed: cudaGetDevice() returned " << cuda_ret << " ("
+                  << cudaGetErrorString(cuda_ret) << ")" << std::endl;
+        return dma_buffer_type<_Tp>(-EIO);
+    }
+
+    CUmemGenericAllocationHandle handle;
+    CUmemAllocationProp prop = {};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.id = device;
+    prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+
+    std::size_t granularity;
+    cu_ret = ::cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+    if (cu_ret != CUDA_SUCCESS) {
+        std::cerr << "CUDA DMA Buffer allocation failed: cuMemGetAllocationGranularity() returned " << cu_ret
+                  << " (requested size: " << size << " bytes)" << std::endl;
+        return dma_buffer_type<_Tp>(-EIO);
+    }
+
+    std::size_t mem_size = ((size + granularity - 1) / granularity) * granularity;
+
+    cu_ret = ::cuMemCreate(&handle, mem_size, &prop, 0);
+    if (cu_ret != CUDA_SUCCESS) {
+        std::cerr << "CUDA DMA Buffer allocation failed: cuMemCreate() returned " << cu_ret << " (size: " << mem_size
+                  << " bytes, device: " << device << ")" << std::endl;
+        std::cerr << "  Possible causes: GPU out of memory, too many allocations, or memory fragmentation" << std::endl;
+        return dma_buffer_type<_Tp>(-ENOMEM);
+    }
+
+    CUdeviceptr ptr;
+    cu_ret = ::cuMemAddressReserve(&ptr, mem_size, granularity, 0, 0);
+    if (cu_ret != CUDA_SUCCESS) {
+        std::cerr << "CUDA DMA Buffer allocation failed: cuMemAddressReserve() returned " << cu_ret
+                  << " (size: " << mem_size << " bytes)" << std::endl;
+        std::cerr << "  Possible cause: Virtual address space exhaustion" << std::endl;
+        cuMemRelease(handle);
+        return dma_buffer_type<_Tp>(-ENOMEM);
+    }
+
+    cu_ret = ::cuMemMap(ptr, mem_size, 0, handle, 0);
+    if (cu_ret != CUDA_SUCCESS) {
+        std::cerr << "CUDA DMA Buffer allocation failed: cuMemMap() returned " << cu_ret << " (ptr: 0x" << std::hex
+                  << ptr << std::dec << ", size: " << mem_size << ")" << std::endl;
+        ::cuMemRelease(handle);
+        ::cuMemAddressFree(ptr, mem_size);
+        return dma_buffer_type<_Tp>(-ENOMEM);
+    }
+
+    CUmemAccessDesc access = {};
+    access.location.id = device;
+    access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    cu_ret = ::cuMemSetAccess(ptr, mem_size, &access, 1);
+    if (cu_ret != CUDA_SUCCESS) {
+        std::cerr << "CUDA DMA Buffer allocation failed: cuMemSetAccess() returned " << cu_ret << " (device: " << device
+                  << ")" << std::endl;
+        ::cuMemUnmap(ptr, mem_size);
+        ::cuMemRelease(handle);
+        ::cuMemAddressFree(ptr, mem_size);
+        return dma_buffer_type<_Tp>(-EACCES);
+    }
+
+    int _fd;
+    cu_ret = ::cuMemGetHandleForAddressRange(&_fd, ptr, mem_size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+    if (cu_ret != CUDA_SUCCESS) {
+        std::cerr << "CUDA DMA Buffer allocation failed: cuMemGetHandleForAddressRange() returned " << cu_ret
+                  << " (size: " << mem_size << " bytes)" << std::endl;
+        std::cerr << "  Possible causes: DMA-BUF export not supported, file descriptor limit reached" << std::endl;
+        ::cuMemUnmap(ptr, mem_size);
+        ::cuMemRelease(handle);
+        ::cuMemAddressFree(ptr, mem_size);
+        return dma_buffer_type<_Tp>(-EINVAL);
+    }
+
+    return dma_buffer_type<_Tp>(
+        fd(_fd), typename dma_buffer_type<_Tp>::mem(reinterpret_cast<_Tp *>(ptr), [mem_size, handle](_Tp * p) {
+            CUdeviceptr ptr = reinterpret_cast<CUdeviceptr>(p);
+            ::cuMemUnmap(ptr, mem_size);
+            ::cuMemRelease(handle);
+            ::cuMemAddressFree(ptr, mem_size);
+        }));
+}
+
+namespace detail {
+
+#  if defined(__CUDACC__)
+
+template<typename _Tp, typename... Args>
+__global__ static void __constructor_caller_kernel(_Tp * p, Args... args) {
+    new (p) _Tp(std::forward<Args>(args)...);
+}
+
+template<typename _Tp>
+__global__ static void __destructor_caller_kernel(_Tp * p) {
+    // NVCC seems to get confused
+    //p->~Tp();
+}
+
+#  endif
+
+}
+
+#  if defined(__CUDACC__)
+template<typename _Tp, typename... Args>
+inline bool cuda::call_constructor(void * p, Args &&... args) noexcept {
+    cudaError_t ret;
+    detail::__constructor_caller_kernel<<<1, 1, 0, get_stream()>>>(
+        reinterpret_cast<_Tp *>(p), std::forward<Args>(args)...);
+    ret = cudaStreamSynchronize(get_stream());
+    return ret == cudaSuccess;
+}
+
+template<typename _Tp>
+inline void cuda::call_destructor(void * ptr) noexcept {
+    // NVCC is getting confused when we call the constructor, so just do nothing for now
+    //detail::__destructor_caller_kernel<<<1, 1, 0, get_stream()>>>(reinterpret_cast<_Tp *>(ptr));
+#    if !defined(NDEBUG)
+    //cudaError_t ret =
+#    endif
+    //    cudaStreamSynchronize(get_stream);
+    //assert(ret == cudaSuccess);
+}
+
+namespace detail {
+
+template<typename _Tp, typename _Fn>
+__global__ static void map_kernel(_Tp * ptr, std::size_t n_elems, _Fn fn) {
+    unsigned id = threadIdx.x + blockIdx.x * blockDim.x;
+    if (id >= n_elems)
+        return;
+    fn(id, ptr + id);
+}
+
+}
+
+template<typename _Tp, typename _Fn>
+inline bool cuda::call_map(_Tp * p, std::size_t n_elems, _Fn && fn) noexcept {
+    static const std::size_t block_size = 128;
+
+    dim3 block(n_elems > block_size ? block_size : n_elems);
+    dim3 grid((n_elems + block.x - 1) / block.x);
+    detail::map_kernel<<<grid, block, 0, get_stream()>>>(p, n_elems, fn);
+    cudaError_t ret = cudaStreamSynchronize(get_stream());
+    return ret == cudaSuccess;
+}
+#  endif
+
+inline void cuda::memset(void * ptr, int c, std::size_t size) noexcept {
+#  if !defined(NDEBUG)
+    cudaError_t cuda_ret =
+#  endif
+        cudaMemsetAsync(ptr, c, size, get_stream());
+    assert(cuda_ret == cudaSuccess);
+}
+
+inline void cuda::memcpy(void * dst, const void * src, std::size_t size) noexcept {
+#  if !defined(NDEBUG)
+    cudaError_t cuda_ret =
+#  endif
+        cudaMemcpyAsync(dst, src, size, cudaMemcpyDefault, get_stream());
+    assert(cuda_ret == cudaSuccess);
+}
+
+#endif // __has_include(<cuda_runtime_api.h>)
+
+}
+
+#endif

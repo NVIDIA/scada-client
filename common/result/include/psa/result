@@ -1,0 +1,248 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_RESULT
+#define PSA_RESULT
+
+#include <type_traits>
+#include <version>
+
+#include <psa/__result_cuda_compat>
+#include <psa/traits>
+
+#include <cuda/std/expected>
+
+//! \file result
+//! Result type that supports synchronous operations
+//!
+//! This is a longer description
+//!
+
+namespace psa {
+
+//! @brief Type that represents either success `_Ok` or failure `_Err`
+//!
+//! @tparam _Ok Success type
+//! @tparam _Err Failure type
+//!
+//! Although it is possible to use ``result`` as a pure template type,
+//! a more convenient approach is to use it to define a ``return_type``
+//! for function within a namespace or methods within a class.
+//! @code{.cpp}
+//! struct foo {
+//!   using result_type = psa::result<float, int>;
+//!
+//!   result_type bar();
+//! };
+//! @endcode
+//!
+//! If the success value of the ``return_type`` differs on different methods
+//! and/or functions, but the failure common is common, a useful usage pattern
+//! is to define ``result_type`` as a template alias
+//! @code{.cpp}
+//! struct foo {
+//!   template<typename _Ok>
+//!   using result_type = psa::result<_Ok, int>;
+//!
+//!   result_type<float>  bar();
+//!   result_type<double> rab();
+//! };
+//! @endcode
+template<typename _Ok, typename _Err>
+class result {
+public:
+    using sync_type = result;
+
+protected:
+    //! @brief Type that holds the `Ok` or `Err` value
+    using variant_type = cuda::std::expected<_Ok, _Err>;
+
+    //! Container of success/failure value
+    variant_type result_;
+
+    //! Deleted copy constructor
+    result(const result &) = delete;
+
+    //! @brief Constructor that takes an `Ok` value
+    //! @param value `Ok` or `Err` value the object stores
+    template<typename... Args>
+    __host__ __device__ constexpr result(cuda::std::in_place_t, Args &&... args) noexcept;
+
+    //! @brief Constructor that takes an `Err` value
+    //! @param value `Ok` or `Err` value the object stores
+    template<typename... Args>
+    __host__ __device__ constexpr result(cuda::std::unexpect_t, Args &&... args) noexcept;
+
+    //! @brief A `psa::result` type that only differs on the `Ok` type
+    template<typename _Fn>
+    using require_same_err_t = typename traits::result::require_same_err_t<_Fn, result>;
+
+    //! @brief A `psa::result` type that only differs on the `Err` type
+    template<typename _Fn>
+    using require_same_ok_t = typename traits::result::require_same_ok_t<_Fn, result>;
+
+public:
+    constexpr result(result &&) noexcept = default;
+
+    //! @name Constructors
+    //! Functions to create ``result`` objects
+    //!@{
+
+    //! @brief Creates a `result` object that stores a success value
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!    auto success = result<std::complex<float>, int>::ok(1.0, -1.0);
+    //! @endcode
+    //! @param  args Arguments to pass to the success object constructor
+    template<typename... Args>
+    __host__ __device__ static constexpr result ok(Args &&... args) noexcept;
+
+    //! @brief Creates a `result` object that stores a failure value
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!    auto failure = result<std::complex<float>, int>::err(EINVAL);
+    //! @endcode
+    //! @param args Arguments to pass to the failure object constructor
+    template<typename... Args>
+    __host__ __device__ static constexpr result err(Args &&... args) noexcept;
+
+    //!@}
+
+    //! @name Basic
+    //! Methods to inspect the contents of ``result`` objects
+    //!@{
+
+    //! @brief Whether the `result` object stores a success value
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!   auto ret = result<std::tuple<>, int>::ok<>();
+    //!   assert(ret.is_ok());
+    //! @endcode
+    __host__ __device__ constexpr bool is_ok() const noexcept;
+
+    //! \brief Whether the result object stores a failure value
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!   auto ret = result<std::tuple<>, int>::err(EINVAL);
+    //!   assert(ret.is_err());
+    //! @endcode
+    __host__ __device__ constexpr bool is_err() const noexcept;
+
+    //! @brief Gets a constant reference to the success value stored in the `result` object
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!   auto ret = result<std::string, int>::ok("Hello World!");
+    //!   assert(ret.ok().compare("Hello World!") == 0);
+    //! @endcode
+    //! @exception std::bad_variant_access If the `result` object does not store a success value
+    __host__ __device__ constexpr const _Ok & ok() const;
+
+    //! @brief Gets a reference to success value stored in the `result` object
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!   auto ret = result<std::string, int>::ok("Hello World!");
+    //!   ret.ok().clear();
+    //!   assert(ret.ok().empty());
+    //! @endcode
+    //! @exception std::bad_variant_access If the `result` object does not store a success value
+    __host__ __device__ constexpr _Ok & ok();
+
+    //! @brief Moves the success value stored in the `result` object
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!    auto ret = result<std::string, int>::ok("Hello World!");
+    //!    auto other = std::string(ret.take_ok()); // Move constructor
+    //!    assert(other.compare("Hello World!") == 0);
+    //! @endcode
+    //! @exception std::bad_variant_access If the `result` object does not store a success value
+    __host__ __device__ constexpr _Ok && take_ok();
+
+    //! @brief Gets a constant reference to the failure value stored in the `result` object
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!    auto ret = result<std::string, int>::err(EINVAL);
+    //!    assert(ret.err() == EINVAL);
+    //! @endcode
+    //! @exception std::bad_variant_access If the the `result` object does not store a failure value
+    __host__ __device__ constexpr const _Err & err() const;
+
+    //! @brief Gets a reference to the failure value stored in the `result` object
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!    auto ret = result<std::string, int>::err(EINVAL);
+    //!    ret.err() = EAGAIN;
+    //!    assert(ret.err() == EAGAIN);
+    //! @endcode
+    //! @exception std::bad_variant_access If the the `result` object does not store a failure value
+    __host__ __device__ constexpr _Err & err();
+
+    //! @brief Moves the failure value stored in the `result` object
+    //!
+    //! **Example**
+    //! @code{.cpp}
+    //!    auto ret = std::result<int, std::string>::err("Error message");
+    //!    auto msg = std::string(std::move(ret.take_err()));
+    //!    assert(msg.compare("Error message") == 0);
+    //! @endcode
+    //! @exception std::bad_variant_access If the the `result` object does not store a failure value
+    __host__ __device__ constexpr _Err && take_err();
+
+    //!@}
+
+    __host__ __device__ constexpr result & operator=(result &&) noexcept;
+
+    __host__ __device__ sync_type sync() noexcept;
+
+    //! @name Monadic
+    //! Monadic operations
+    //!@{
+
+    //! @brief Maps a `result<T, Err>` to `result<S, Err>` by applying a function to a contained success value,
+    //! leaving a failure value untouched
+    //!
+    //! @param fn Callable object that implements the map operation
+    template<typename _Fn>
+    __host__ __device__ constexpr result<std::invoke_result_t<_Fn, _Ok>, _Err> map(_Fn && fn) noexcept;
+
+    //! @brief Maps a `result<Ok, T>` to `result<Ok, S>` by applying a function to a contained failure value,
+    //! leaving a success value untouched
+    //!
+    //! @param fn Callable object that implements the map operation
+    template<typename _Fn>
+    __host__ __device__ constexpr result<_Ok, std::invoke_result_t<_Fn, _Err>> map_err(_Fn && fn) noexcept;
+
+    //! @brief Calls an operation if the result stores a success value, otherwise returns a result with
+    //! the same failure value
+    //!
+    //! @param fn Callable object to call if the `result` stores a success value
+    //! @param args Additional arguments to pass to the `err` function of the return type to produce a failure value
+    template<typename _Fn, typename... Args>
+    __host__ __device__ constexpr require_same_err_t<_Fn> and_then(_Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Calls an operation if the result stores a failure value, otherwise returns a result with
+    //! the same success value
+    //!
+    //! @param fn Callable object to call if the `result` stores a failure value
+    //! @param args Additional arguments to pass to the `ok` function of the return type to produce a success value
+    template<typename _Fn, typename... Args>
+    __host__ __device__ constexpr require_same_ok_t<_Fn> or_else(_Fn && fn, Args &&... args) noexcept;
+
+    //!@}
+};
+
+}
+
+#include "impl/result"
+
+#endif

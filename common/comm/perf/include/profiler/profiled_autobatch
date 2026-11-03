@@ -1,0 +1,71 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef PROFILER_AUTOBATCH_HPP
+#define PROFILER_AUTOBATCH_HPP
+
+namespace profiler {
+
+enum class AutobatchOps {
+    PUSH,
+};
+
+/**
+ * @brief A wrapper for autobatch implementations that adds profiling capabilities.
+ * 
+ * This class uses the Curiously Recurring Template Pattern (CRTP) to add
+ * profiling to any autobatch implementation without virtual function overhead.
+ * 
+ * @tparam AutobatchImpl The autobatch implementation to profile
+ * @tparam Profiler The profiler to use
+ */
+template<typename _AutobatchImpl, typename _Profiler>
+class ProfiledAutobatch : public _AutobatchImpl {
+    _Profiler profiler_;
+
+public:
+    // Inherit constructors from the base class
+    using _AutobatchImpl::_AutobatchImpl;
+
+    /**
+     * @brief Set the profiler to use
+     * 
+     * @param profiler The profiler to use
+     */
+    __host__ __device__ void setProfiler(_Profiler & profiler) { profiler_ = profiler; }
+
+    /**
+     * @brief Override the push method to add profiling
+     * 
+     * @tparam Args Argument types for the push method
+     * @param args Arguments for the push method
+     * @return Return value from the base implementation's push method
+     */
+    template<typename... Args>
+    __host__ __device__ void push(Args &&... args) {
+        auto token = profiler_.start();
+        static_cast<_AutobatchImpl *>(this)->push(std::forward<Args>(args)...);
+        profiler_.end(token);
+    }
+
+    /**
+     * @brief Push N elements in a loop
+     * 
+     * @tparam N The number of elements to push
+     * @tparam Args Argument types for the push method
+     * @param args Arguments for the push method
+     */
+    template<unsigned N, typename... Args>
+    __host__ __device__ void push_N(Args &&... args) {
+        auto token = profiler_.start();
+        for (unsigned i = 0; i < N; ++i) {
+            static_cast<_AutobatchImpl *>(this)->push(std::forward<Args>(args)...);
+        }
+        profiler_.end(token);
+    }
+};
+
+} // namespace profiler
+
+#endif // PROFILER_AUTOBATCH_HPP

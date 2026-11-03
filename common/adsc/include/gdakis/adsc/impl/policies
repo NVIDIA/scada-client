@@ -1,0 +1,57 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_ADSC_IMPL_POLICIES
+#define GDAKIS_ADSC_IMPL_POLICIES
+
+GDAKIS_ADSC_SIMPLE_NS {
+GDAKIS_ADSC_UNIT(policies) {
+
+template<typename... Args>
+__host__ __device__ inline policies_type<Args...>::policies_type(Args &&... args) noexcept
+    : policies_(std::make_tuple(std::forward<Args>(args)...)) {}
+
+template<typename... Args>
+__host__ __device__ inline auto policies_type<Args...>::miss() const noexcept {
+    return std::get<static_cast<unsigned>(policy_offsets::miss)>(policies_);
+}
+
+template<typename... Args>
+__host__ __device__ inline auto policies_type<Args...>::evict() const noexcept {
+    return std::get<static_cast<unsigned>(policy_offsets::evict)>(policies_);
+}
+
+template<typename... Args>
+__host__ __device__ inline auto policies_type<Args...>::victim() const noexcept {
+    return std::get<static_cast<unsigned>(policy_offsets::victim)>(policies_);
+}
+
+template<typename... Args>
+__host__ __device__ inline auto policies_type<Args...>::key_to_cl_id() const noexcept {
+    return std::get<static_cast<unsigned>(policy_offsets::key_to_cl_id)>(policies_);
+}
+
+template<typename... Args>
+__host__ __device__ inline auto policies_type<Args...>::key_to_cl_offset() const noexcept {
+    return std::get<static_cast<unsigned>(policy_offsets::key_to_cl_offset)>(policies_);
+}
+
+template<typename... Args>
+__host__ __device__ inline auto policies_type<Args...>::cl_to_set() const noexcept {
+    return std::get<static_cast<unsigned>(policy_offsets::cl_to_set)>(policies_);
+}
+
+template<typename... Args>
+__host__ __device__ inline auto policies_type<Args...>::nth_key_of_cl() const noexcept {
+    return std::get<static_cast<unsigned>(policy_offsets::nth_key_of_cl)>(policies_);
+}
+
+template<typename... Args>
+__host__ __device__ inline auto make_policies(Args &&... args) noexcept {
+    return policies_type<Args...>(std::forward<Args>(args)...);
+}
+
+}}
+
+#endif

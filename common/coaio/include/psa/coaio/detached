@@ -1,0 +1,38 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_DETACHED
+#define PSA_COAIO_DETACHED
+
+#include <atomic>
+#include <psa/futures>
+
+#include <psa/coaio/types>
+
+//! @file detached
+
+namespace psa { namespace coaio {
+
+//! @brief Return type for coroutines that are not co-awaited
+struct detached {
+#if defined(__psa_use_coroutines)
+    struct promise_type;
+#endif
+};
+
+#if defined(__psa_use_coroutines)
+
+//! @brief Pool of detached co-routines
+struct pooled {
+    template<typename _Fn>
+    static psa::futures::result<none_type, int> spawn(size_t, _Fn &&) noexcept;
+};
+#endif
+
+}}
+
+#include "impl/detached"
+
+#endif

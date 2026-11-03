@@ -1,0 +1,368 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_SCHEDULER_IMPL_EPOLL
+#  define PSA_COAIO_SCHEDULER_IMPL_EPOLL
+
+#  include <cerrno>
+#  include <cstring>
+#  include <fcntl.h>
+#  include <unistd.h>
+
+namespace psa { namespace coaio { namespace scheduler {
+
+// epoll::dispatcher_handle
+#  if defined(__psa_use_coroutines)
+
+inline epoll::dispatcher_handle::dispatcher_handle(std::coroutine_handle<> && h) noexcept
+    : std::coroutine_handle<>(std::move(h)) {}
+
+inline epoll::dispatcher_handle & epoll::dispatcher_handle::operator=(std::nullptr_t) noexcept {
+    std::coroutine_handle<>::operator=(nullptr);
+    return *this;
+}
+
+struct epoll::dispatcher_handle::promise_type {
+    std::coroutine_handle<> continuation_;
+
+    inline dispatcher_handle get_return_object() noexcept {
+        return dispatcher_handle(std::coroutine_handle<promise_type>::from_promise(*this));
+    }
+
+    inline std::suspend_always initial_suspend() const noexcept { return {}; }
+
+    inline auto final_suspend() noexcept {
+        struct continuation_awaiter {
+            std::coroutine_handle<> continuation_;
+
+            inline continuation_awaiter(std::coroutine_handle<> && continuation) noexcept
+                : continuation_(std::move(continuation)) {}
+
+            inline bool await_ready() const noexcept { return false; }
+
+            inline std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept { return continuation_; }
+
+            inline void await_resume() const noexcept {}
+        };
+        return continuation_awaiter(std::move(continuation_));
+    }
+
+    inline void return_void() const noexcept {}
+
+    inline void unhandled_exception() const noexcept {}
+};
+#  endif
+
+// epoll::sched_type
+inline epoll::sched_type::sched_type(int fd) noexcept
+#  if defined(__psa_use_coroutines)
+    : fd_(fd),
+      wait_count_(0)
+#  endif
+{
+}
+
+inline epoll::sched_type::~sched_type() noexcept {
+#  if defined(__psa_use_coroutines)
+    assert(ready_list_.empty());
+    if (fd_ >= 0)
+        ::close(fd_);
+#  endif
+}
+
+inline auto epoll::sched_type::make() noexcept {
+    int fd = ::epoll_create1(0);
+    if (fd < 0)
+        return result<sched_type::ptr>::err(errno);
+    return result<sched_type::ptr>::ok(new sched_type(fd));
+}
+
+inline epoll::result<> epoll::sched_type::register_file_descriptor(int fd) const noexcept {
+#  if defined(__psa_use_coroutines)
+    if (fd_ < 0)
+        return result<>::err(ECANCELED);
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    int err = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (err < 0)
+        return result<>::err(errno);
+
+    ::epoll_event ep_event;
+    ::memset(&ep_event, 0, sizeof(ep_event));
+    ep_event.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLERR;
+    ep_event.data.fd = fd;
+    err = ::epoll_ctl(fd_, EPOLL_CTL_ADD, fd, &ep_event);
+    return err == 0 ? result<>::ok<>() : result<>::err(errno);
+#  else
+    return result<>::ok<>();
+#  endif
+}
+
+inline void epoll::sched_type::unregister_file_descriptor(int fd) noexcept {
+#  if defined(__psa_use_coroutines)
+    if (fd_ < 0)
+        return;
+
+    ::epoll_event ep_event;
+    ::epoll_ctl(fd_, EPOLL_CTL_DEL, fd, &ep_event);
+
+    mcs::node lock(lock_);
+    if (fd < static_cast<int>(wait_table_.size())) {
+        wait_count_ -= wait_table_[fd].read_.size() + wait_table_[fd].write_.size();
+        wait_table_[fd].read_.clear();
+        wait_table_[fd].write_.clear();
+    }
+#  endif
+}
+
+inline void epoll::sched_type::disable() noexcept {
+#  if defined(__psa_use_coroutines)
+    if (fd_ >= 0)
+        ::close(fd_);
+    fd_ = -1;
+#  endif
+}
+
+#  if defined(__psa_use_coroutines)
+inline void epoll::sched_type::dispatcher() noexcept {
+    std::coroutine_handle<> continuation;
+    {
+        std::lock_guard<std::mutex> lock(ready_mutex_);
+        ::epoll_event ep_event;
+        while (ready_list_.empty()) {
+            if (wait_count_ == 0)
+                return;
+
+            ::epoll_wait(fd_, &ep_event, 1, -1);
+
+            std::atomic_ref<int> read_in_event_ref(wait_table_[ep_event.data.fd].read_in_event_);
+            std::atomic_ref<int> read_out_event_ref(wait_table_[ep_event.data.fd].read_out_event_);
+            std::atomic_ref<int> write_in_event_ref(wait_table_[ep_event.data.fd].write_in_event_);
+            std::atomic_ref<int> write_out_event_ref(wait_table_[ep_event.data.fd].write_out_event_);
+            {
+                int read_in = 0, write_in = 0;
+                {
+                    mcs::node lock(lock_);
+                    if (ep_event.data.fd >= static_cast<int>(wait_table_.size()))
+                        continue;
+
+                    read_in = read_in_event_ref.load(std::memory_order_acquire);
+                    write_in = write_in_event_ref.load(std::memory_order_acquire);
+                }
+
+                // TODO: We might get a EPOLLHUP on a socket attempting to connect that causes
+                // the server's backlog to overflow. The problem is that the next call to connect
+                // will also return error (EAGAIN), no new events will get generated and, thus,
+                // that socket will never return from connect. For now, we just set the backlog
+                // to a large number to prevent this situation, but we should somehow force
+                // the subsequent call to connect to fail if we received a EPOLLHUP on the fd
+                if (ep_event.events & (EPOLLHUP | static_cast<uint32_t>(event_type::read))) {
+                    for (;;) {
+                        mcs::node lock(lock_);
+                        if (ep_event.data.fd >= static_cast<int>(wait_table_.size()))
+                            break;
+                        if (read_out_event_ref.load(std::memory_order_relaxed) == read_in) {
+                            wait_count_ -= wait_table_[ep_event.data.fd].read_.size();
+                            ready_list_.splice(ready_list_.end(), wait_table_[ep_event.data.fd].read_);
+                            break;
+                        }
+                        // Short sleep
+                    }
+                }
+                if (ep_event.events & (EPOLLHUP | static_cast<uint32_t>(event_type::write))) {
+                    for (;;) {
+                        mcs::node lock(lock_);
+                        if (ep_event.data.fd >= static_cast<int>(wait_table_.size()))
+                            break;
+                        if (write_out_event_ref.load(std::memory_order_relaxed) == write_in) {
+                            wait_count_ -= wait_table_[ep_event.data.fd].write_.size();
+                            ready_list_.splice(ready_list_.end(), wait_table_[ep_event.data.fd].write_);
+                            break;
+                        }
+                        // Short sleep
+                    }
+                }
+            }
+        }
+        continuation = std::move(ready_list_.front());
+        ready_list_.pop_front();
+    }
+
+    continuation.resume();
+}
+#  endif
+
+// epoll::handle_type
+
+inline epoll::handle_type::handle_type(const sched_type::ptr & sched, int fd) noexcept : fd_(fd), sched_(sched) {}
+
+inline epoll::handle_type::handle_type(handle_type && other) noexcept
+    : fd_(other.fd_),
+      sched_(std::move(other.sched_)) {
+    other.fd_ = -1;
+}
+
+inline epoll::handle_type::~handle_type() noexcept {
+    if (fd_ > 0) {
+        sched_->unregister_file_descriptor(fd_);
+        ::close(fd_);
+    }
+}
+
+inline int epoll::handle_type::fd() const noexcept {
+    return fd_;
+}
+
+template<typename _Fn>
+inline psa::futures::from_sync_t<std::invoke_result_t<_Fn>> epoll::handle_type::await(
+    const event_type & e, _Fn && fn) noexcept {
+#  if defined(__psa_use_coroutines)
+    struct event_awaiter {
+        friend class ::psa::coaio::scheduler::epoll;
+
+        using event_type = sched_type::event_type;
+
+        sched_type::ptr sched_;
+        event_type event_;
+        int fd_;
+
+        inline event_awaiter(const sched_type::ptr & sched, event_type event, int fd) noexcept
+            : sched_(sched),
+              event_(event),
+              fd_(fd) {}
+
+        inline bool is_ready() const noexcept { return false; }
+
+        inline std::function<void(void)> schedule(std::coroutine_handle<> continuation) noexcept {
+            {
+                mcs::node lock(sched_->lock_);
+                if (fd_ >= static_cast<int>(sched_->wait_table_.size()))
+                    sched_->wait_table_.resize(fd_ + 1);
+
+                std::atomic_ref<int> read_in_event_ref(sched_->wait_table_[fd_].read_in_event_);
+                std::atomic_ref<int> read_out_event_ref(sched_->wait_table_[fd_].read_out_event_);
+                std::atomic_ref<int> write_in_event_ref(sched_->wait_table_[fd_].write_in_event_);
+                std::atomic_ref<int> write_out_event_ref(sched_->wait_table_[fd_].write_out_event_);
+
+                switch (event_) {
+                case event_type::read:
+                    sched_->wait_count_++;
+                    sched_->wait_table_[fd_].read_.emplace_back(std::move(continuation));
+                    read_out_event_ref.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case event_type::write:
+                    sched_->wait_count_++;
+                    sched_->wait_table_[fd_].write_.emplace_back(std::move(continuation));
+                    write_out_event_ref.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                default:
+                    assert(0);
+                }
+            }
+            return [sched = sched_]() { sched->dispatcher(); };
+        }
+
+        inline bool value() const noexcept { return true; }
+    };
+
+    using result_type = std::invoke_result_t<_Fn>;
+    auto cont = std::move(fn);
+    auto event = e;
+    if (fd_ >= static_cast<int>(sched_->wait_table_.size()))
+        sched_->wait_table_.resize(fd_ + 1);
+    std::atomic_ref<int> read_in_event_ref(sched_->wait_table_[fd_].read_in_event_);
+    std::atomic_ref<int> write_in_event_ref(sched_->wait_table_[fd_].write_in_event_);
+    std::atomic_ref<int> read_out_event_ref(sched_->wait_table_[fd_].read_out_event_);
+    std::atomic_ref<int> write_out_event_ref(sched_->wait_table_[fd_].write_out_event_);
+    for (;;) {
+        {
+            mcs::node lock(sched_->lock_);
+            if (fd_ >= static_cast<int>(sched_->wait_table_.size()))
+                sched_->wait_table_.resize(fd_ + 1);
+            switch (event) {
+            case event_type::read:
+                read_in_event_ref.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case event_type::write:
+                write_in_event_ref.fetch_add(1, std::memory_order_relaxed);
+                break;
+            default:
+                assert(0);
+            }
+        }
+        auto res = cont();
+        if (res.is_ok()) {
+            {
+                mcs::node lock(sched_->lock_);
+                if (fd_ >= static_cast<int>(sched_->wait_table_.size()))
+                    sched_->wait_table_.resize(fd_ + 1);
+                switch (event) {
+                case event_type::read:
+                    read_out_event_ref.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case event_type::write:
+                    write_out_event_ref.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                default:
+                    assert(0);
+                }
+            }
+            co_return std::move(res);
+        } else if (res.is_err() and res.err() != EAGAIN) {
+            {
+                mcs::node lock(sched_->lock_);
+                if (fd_ >= static_cast<int>(sched_->wait_table_.size()))
+                    sched_->wait_table_.resize(fd_ + 1);
+                switch (event) {
+                case event_type::read:
+                    read_out_event_ref.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case event_type::write:
+                    write_out_event_ref.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                default:
+                    assert(0);
+                }
+            }
+            co_return result_type::err(res.take_err());
+        }
+        auto ret = co_await event_awaiter(sched_, event, fd_);
+        if (ret == false) {
+            co_return result_type::err(EBUSY);
+        }
+    }
+#  else
+    return fn();
+#  endif
+}
+
+inline epoll::result<> epoll::handle_type::rearm() const noexcept {
+    return sched_->register_file_descriptor(fd_);
+}
+
+// epoll
+
+inline epoll::epoll(sched_type::ptr && sched) noexcept : scheduler_(std::move(sched)) {}
+
+inline epoll::result<epoll> epoll::create() noexcept {
+    auto sched = sched_type::make();
+    if (sched.is_err())
+        return result<epoll>::err(sched.err());
+    return result<epoll>::ok(epoll { sched.take_ok() });
+}
+
+inline epoll::result<epoll::handle_type> epoll::register_file_descriptor(int fd) const noexcept {
+    return scheduler_->register_file_descriptor(fd).map([this, fd](auto) { return handle_type(scheduler_, fd); });
+}
+
+inline void epoll::disable() const noexcept {
+    scheduler_->disable();
+}
+
+}}}
+
+#endif
+
+// vim: set filetype=cpp :

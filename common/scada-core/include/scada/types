@@ -1,0 +1,34 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_TYPES
+#define SCADA_TYPES
+
+#include <scada/__core_version>
+
+#include <gdakis/atomic>
+#include <gdakis/protocol>
+#include <psa/result>
+
+SCADA_CORE_SIMPLE_NS {
+SCADA_CORE_UNIT(types) {
+
+template<typename _Tp>
+using result = psa::result<_Tp, int>;
+
+using thread_scope = gdakis::thread_scope;
+static constexpr thread_scope thread_scope_block = gdakis::thread_scope_block;
+static constexpr thread_scope thread_scope_device = gdakis::thread_scope_device;
+static constexpr thread_scope thread_scope_system = gdakis::thread_scope_system;
+
+using device_type = gdakis::comm::device_type;
+
+struct none_type {};
+
+}}
+
+SCADA_CORE_EXPORT_SIMPLE_NS(scada, types)
+
+#endif

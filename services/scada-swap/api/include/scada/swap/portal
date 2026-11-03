@@ -1,0 +1,394 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_PORTAL
+#define SCADA_SWAP_PORTAL
+
+//! @file scada/swap/portal
+
+#include <bit>
+
+#include <scada/__scada_swap_version>
+#include <scada/swap/__cuda_compat>
+#include <scada/swap/__swap_log>
+#include <scada/swap/apply_sm>
+#include <scada/swap/pointer>
+#include <scada/swap/reference>
+#include <scada/swap/types>
+#include <scada/types>
+
+#include <gdakis/ipc/autobatch>
+#include <gdakis/ipc/io_buffer_pool>
+
+#include <gdakis/adsc/cache>
+
+#include <cuda/std/mdspan>
+
+SCADA_SWAP_SIMPLE_NS {
+
+SCADA_SWAP_UNIT(slab) {
+
+//! @brief Type passed around to represent the slab
+//!
+//! @tparam _Tp Data type of elements in slab
+//! @tparam _Store Type of store
+template<typename _Tp, typename _Store>
+class slab;
+
+}
+
+//! \cond SCADA_SWAP_INTERNAL_DETAIL
+namespace detail {
+
+constexpr std::size_t min_access_granularity = 512;
+constexpr std::size_t max_access_granularity = 16 * 1024 * 1024;
+
+template<std::size_t Value, std::size_t Current>
+struct largest_power_of_two_divisor {
+    static_assert((Current & (Current - 1)) == 0, "Current must be a power of two");
+    static constexpr std::size_t value
+        = (Value % Current == 0) ? Current : largest_power_of_two_divisor<Value, Current / 2>::value;
+};
+
+template<std::size_t Value>
+struct largest_power_of_two_divisor<Value, min_access_granularity> {
+    static constexpr std::size_t value = min_access_granularity;
+};
+
+} // namespace detail
+//! \endcond
+
+SCADA_SWAP_UNIT(portal) {
+
+//! @brief Type for portail traits
+template<device_type>
+struct portal_traits;
+
+//! @brief Data type which application threads use to access data from store in allocated slabs
+//!
+//! @tparam _Tp Data type of elements accessed through portal
+//! @tparam _CL_Size Number of elements of _Tp type in a cache line
+//! @tparam _Device GDAKIS device where this portal will execute
+//! @tparam _NumBuffers The number of autobatch buffers
+//! @tparam _Ways Number of ways in the cache
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco = thread_scope_device,
+    std::size_t _NumBuffers = 2, unsigned _Ways = 32>
+class portal {
+public:
+    //! @brief Data type for indexing the data in a store
+    struct index_type {
+        //! @brief Offset into the slab in terms of number of _Tp elements
+        std::uint64_t offset : 48;
+        //! @brief Slab id
+        std::uint64_t id : 16;
+
+        //! @brief Operator to add to the offset of the index
+        //!
+        //! @param i Number of elements to add to the offset of the index
+        //! @return Index with incremented offset
+        __host__ __device__ constexpr index_type operator+(const std::size_t i) const noexcept;
+
+        //! @brief Invalid value for the index type
+        __host__ __device__ constexpr static index_type invalid() noexcept;
+
+        //! @brief Operator to convert the index type to a 64-bit integer
+        //! @return 64-bit integer representation of the index
+        __host__ __device__ constexpr operator std::uint64_t() const noexcept;
+    };
+    //! @brief Value data type
+    using value_type = _Tp;
+    //! @brief Reference data type
+    using reference_type = ::scada::swap::reference_type<portal>;
+
+    //! @brief Number of elements of _Tp type in a cache line
+    constexpr static std::size_t cl_size = _CL_Size;
+
+    constexpr static std::size_t compute_access_granularity() {
+        // Choose the largest supported granularity that divides the cache line size in bytes.
+        // Supported granularities include every power-of-two from 512B up to 16MB plus 3KB for 512-LBA namespaces.
+        constexpr std::size_t total_bytes = sizeof(value_type) * cl_size;
+        if constexpr ((total_bytes % 4096) != 0 && (total_bytes % 3072) == 0) {
+            return 3072;
+        }
+        return detail::largest_power_of_two_divisor<total_bytes, detail::max_access_granularity>::value;
+    }
+
+    //! @brief Access granularity in bytes (any power-of-two from 512B to 16MB plus 3KB)
+    constexpr static std::size_t access_granularity = compute_access_granularity();
+    //! @brief Alignment for the cache line object (keep power-of-two for C++/DMA compatibility)
+    //! \hideinitializer
+    // Keep 3K aligned to the nearest power-of-two for DMA/C++ alignment rules.
+    constexpr static std::size_t access_alignment = (access_granularity == 3072) ? 1024 : access_granularity;
+    //! @brief Aligned cache line data type
+    struct alignas(access_alignment) cl_type {
+        value_type vals_[cl_size];
+    };
+    static_assert((sizeof(cl_type) % (access_granularity == 3072 ? 1024 : access_granularity)) == 0);
+
+    //! @brief Minimum number of ns to sleep while polling
+    constexpr static unsigned min_backoff_ = 16;
+    //! @brief Maxiimum number of ns to sleep while polling
+    constexpr static unsigned max_backoff_ = 256;
+
+    //! @brief Number of ways in the cache
+    constexpr static unsigned ways = _Ways;
+    //! @brief Cache line reference type to use for ADSC
+    using adsc_cl_ref_type = gdakis::adsc::cl_reference<_Sco, index_type, value_type, _CL_Size>;
+
+public:
+    //! @brief Specialized ADSC cache type
+    using adsc_type = gdakis::adsc::cache<_Sco, adsc_cl_ref_type, ways>;
+    //! @brief Handle type for the specialized ADSC
+    using adsc_handle = typename adsc_type::template handle<typename portal_traits<_Device>::allocator_type>;
+
+    //! @brief Specialized autobatch type for portal to use to access data in the store
+    using autobatch_type
+        = gdakis::comm::ipc::autobatch<typename portal_traits<_Device>::allocator_type, wqe_type, _Sco, _NumBuffers>;
+    //! @brief Handle type for the specialized autobatch
+    using autobatch_handle = typename autobatch_type::handle;
+    //! @brief Speciailized io buffer pool type to use for data transfers
+    using io_buffer_pool_type = gdakis::comm::ipc::io_buffer_pool<cl_type, status_type>;
+    //! @brief Handle type for the io buffer pool type
+    using io_buffer_pool_handle =
+        typename io_buffer_pool_type::template handle<typename portal_traits<_Device>::allocator_type>;
+
+    //! @brief Accessor type to enable mdspan to access data through the portal
+    class accessor {
+    public:
+        using offset_policy = accessor;
+        using element_type = _Tp;
+        using data_handle_type = pointer_type<portal>;
+        using reference = typename data_handle_type::reference_type;
+
+    public:
+        //! @brief Method to access data at index i via pointer p
+        //! @param p Pointer to the backing data
+        //! @param i Index to access
+        //! @return Reference to the data at index i with pointer p
+        __host__ __device__ constexpr reference access(data_handle_type p, std::size_t i) const noexcept;
+
+        __host__ __device__ constexpr data_handle_type offset(data_handle_type p, std::size_t i) const noexcept;
+    };
+
+    //! @brief Specialized mdspan type
+    using span = cuda::std::mdspan<_Tp, cuda::std::extents<std::size_t, cuda::std::dynamic_extent>,
+        cuda::std::layout_right, accessor>;
+
+    //! @brief Handle type that holds the portal resources
+    class handle_type {
+    protected:
+        //! @brief Handle for the autobatch the portal uses to communciate to server
+        autobatch_handle autobatch_;
+        //! @brief Handle for the io buffer pool the portal uses for sharing data with server
+        io_buffer_pool_handle io_buffers_;
+        //! @brief Handle for the ADSC cache the portal uses to cache the data
+        adsc_handle adsc_;
+
+        //! @brief Pointer to the portal
+        gdakis::umem::ptr_type<portal> portal_;
+
+    public:
+        //! @brief Constructor for the handle type
+        //! @param autobatch Handle for the autobatch the portal uses to communciate to server
+        //! @param io_buffers Handle for the io buffer pool the portal uses for sharing data with server
+        //! @param adsc Handle for the ADSC cache the portal uses to cache the data
+        handle_type(autobatch_handle && autobatch, io_buffer_pool_handle && io_buffers, adsc_handle && adsc) noexcept;
+
+        //! @brief Getter for the raw pointer to the portal
+        //! @return Pointer to the portal
+        portal * get() const noexcept;
+
+        //! @brief Allocates span from a store
+        //! @tparam _Store Store data type
+        //! @param store Store from which to allocate a slab
+        //! @return The allocated slab
+        template<typename _Store>
+        span make_span(const slab<_Tp, _Store> & store) noexcept;
+
+        //! @brief Synchronize the backing store and the portal
+        //! @param order Memory order to specify the type of synchronziation operation. Acquire will cause a cache invalidation and Release will cause a cache flush.
+        void sync(const gdakis::memory_order order) const noexcept;
+    };
+
+protected:
+    friend class handle_type;
+
+    //! @brief Pointer to the autobatch the portal uses to communciate to server
+    autobatch_type * autobatch_;
+    //! @brief Pointer to the io buffer pool the portal uses for sharing data with server
+    io_buffer_pool_type io_pool_;
+    //! @brief Pointer to the ADSC cache the portal uses to cache the data
+    adsc_type * adsc_;
+
+    //! @brief Miss handler for the cache to fetch data on misses
+    //! @param cl_ref Reference to the cache line being filled
+    //! @return Error code on error, zero otherwise
+    __host__ __device__ int miss_handler(adsc_cl_ref_type & cl_ref) noexcept;
+
+    //! @brief Victim handler for the cache to handle victims of eviction
+    //! @param cl_ref Reference to the cache line being evicted
+    //! @return Error code on error, zero otherwise
+    __host__ __device__ int victim_handler(adsc_cl_ref_type & cl_ref) noexcept;
+
+    //! @brief Handler for cache to compute the cache line id from the index
+    //! @param idx Index being used to access the portal
+    //! @return Cache line id for the data pointed to by index
+    __host__ __device__ typename adsc_type::cl_id_type key_to_cl_id(const index_type idx) const noexcept;
+
+    //! @brief Handler for cache to compute the cache line offset from the index
+    //! @param idx Index being used to access the portal
+    //! @return Cache line offset for the data pointed to by index
+    __host__ __device__ unsigned key_to_cl_offset(const index_type idx) const noexcept;
+
+    //! @brief Handler for cache to compute the set id for a given cache line id and number of ways
+    //! @param cl_id ID of the cache line being accessed
+    //! @param num_ways Number of ways in the cache
+    //! @return ID of set the cache line belongs to
+    __host__ __device__ typename adsc_type::set_id_type cl_to_set(
+        const index_type cl_id, const unsigned num_ways) const noexcept;
+
+    //! @brief Handler for cache to compute the index of the nth element of a cache line
+    //! @param cl_id ID of the cache line
+    //! @param n The offset into the cache line
+    //! @return Index of the nth element of the cache line
+    __host__ __device__ index_type nth_key_of_cl(const index_type cl_id, const unsigned n) const noexcept;
+#if defined(__CUDACC__)
+    template<typename _Portal, typename _CL_Ref>
+    friend __device__ int victim_fn(_Portal * portal, _CL_Ref & ref);
+#endif
+
+public:
+    //! @brief Constructor for the protal
+    //! @param autobatch Pointer to the autobatch
+    //! @param io_buffers IO buffers used by the cache in the portal
+    //! @param adsc Pointer to the adsc cache
+    __host__ __device__ portal(
+        autobatch_type * autobatch, io_buffer_pool_type && io_buffers, adsc_type * adsc) noexcept;
+
+    //! @brief Get the value at specified index
+    //! @param idx Index of the data element to fetch
+    //! @return Result type with the value of the data element on success and with error otherwise
+    __host__ __device__ result<_Tp> get(index_type idx) noexcept;
+
+    //! @brief Put the value provided at the specified index
+    //! @param idx Index of the data element to put
+    //! @param val Value to put
+    //! @return Result type with error code if failed
+    __host__ __device__ result<none_type> put(index_type idx, const _Tp & val) noexcept;
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+    //! @brief Get the value at specified index as a warp collective
+    //! @tparam _Cg Group type
+    //! @param group Group of threads that participate in the collective
+    //! @param idx Index of the data element to fetch
+    //! @param ret Reference to where the retrieved data will be stored
+    //! @return Result type with error code if failed
+    template<typename _Cg>
+    __device__ result<none_type> get_group(_Cg & group, index_type idx, _Tp & ret) noexcept;
+
+    //! @brief Put the value provided at the specified index as a warp collective
+    //! @tparam _Cg Group type
+    //! @param group Group of threads that participate in the collective
+    //! @param idx Index of the data element to put
+    //! @param val Value to put
+    //! @return Result type with error code if failed
+    template<typename _Cg>
+    __device__ result<none_type> put_group(_Cg & group, index_type idx, const _Tp & val) noexcept;
+
+#endif
+
+    // ========== Async I/O API ==========
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+    //! @brief Cooperative async apply API - threads help each other process work items (scratch buffer pattern)
+    //! @tparam _Cg Group type
+    //! @tparam _Fn Callback function type
+    //! @param group Group of threads that participate in the collective
+    //! @param states User-allocated shared memory array (must be size group.size())
+    //! @param idx Index for this thread to access
+    //! @param scratch_buffers Scratch buffer array (must be size group.size())
+    //! @param callback Callback invoked when each element is ready (must copy to final destination)
+    //! @param active Whether the thread is active
+    //! @return Result type with error code if failed
+    template<unsigned TILESIZE, unsigned BLOCKSIZE, typename _Cg, typename _Fn>
+    __device__ result<none_type> coop_apply(_Cg & group, apply_sm::state_t * states, index_type idx,
+        _Tp * scratch_buffers, _Fn && callback, bool active) noexcept;
+
+    //! @brief Cooperative async apply_target API - threads help each other process work items (destination buffer pattern)
+    //! @tparam TILESIZE Tile size (must match the cooperative group size)
+    //! @tparam BLOCKSIZE Block size (threads per block)
+    //! @tparam _Cg Group type
+    //! @tparam _Fn Callback function type
+    //! @param group Group of threads that participate in the collective
+    //! @param states User-allocated shared memory array (must be size group.size())
+    //! @param idx Index for this thread to access
+    //! @param destination_buffers Destination buffer array (must be size group.size())
+    //! @param callback Optional callback invoked when each element is ready (no memcpy needed)
+    //! @param active Whether the thread is active
+    //! @return Result type with error code if failed
+    template<unsigned TILESIZE, unsigned BLOCKSIZE, typename _Cg, typename _Fn>
+    __device__ result<none_type> coop_apply_target(_Cg & group, apply_sm::state_t * states, index_type idx,
+        _Tp * destination_buffers, _Fn && callback, bool active) noexcept;
+
+private:
+    //! @brief Internal helper: attempt to acquire cache line for one async request
+    //! @tparam _Cg Group type
+    //! @param group Group of threads
+    //! @param idx Index to access
+    //! @param state State for this request
+    //! @return Result type with error code if failed
+    template<typename _Cg>
+    __device__ result<none_type> access_async_group(
+        const _Cg & group, index_type idx, apply_sm::state_t & state) noexcept;
+
+    //! @brief Check if async I/O has completed
+    //! @param state State for this request
+    //! @return true if I/O complete, false if still pending
+    __device__ bool check_io_completion(apply_sm::state_t & state) noexcept;
+
+    //! @brief Release cache line lock (only unlocks, does not copy data)
+    //! @tparam _Cg Group type
+    //! @param group Group of threads
+    //! @param state State for this request
+    template<typename _Cg>
+    __device__ void release_cl(const _Cg & group, apply_sm::state_t & state) noexcept;
+
+public:
+#endif
+
+    //! @brief Build a portal for accessing a store
+    //! @tparam _Store Store type
+    //! @param store Store which the portal will access
+    //! @param size Number of buffer entries in each buffer of the autobatch
+    //! @param num_cls Number of cache lines in the cache
+    //! @return Result type with a handle to the portal on success and error otherwise
+    template<typename _Store>
+    static inline result<handle_type> build(_Store & store, std::size_t size, std::size_t num_cls) noexcept;
+
+    //! @brief Direct access to autobatch for testing - bypasses cache completely
+    //! @tparam _Fn Function object type
+    //! @param fn Function object that takes a wqe_type& and fills it
+    //! @return Result type with error code if failed
+    template<typename _Fn>
+    __host__ __device__ result<none_type> push_direct(_Fn && fn) noexcept {
+        autobatch_->push(std::forward<_Fn>(fn));
+        return result<none_type>::ok<>();
+    }
+
+    //! @brief Get direct access to io pool for testing
+    //! @return Reference to the io pool
+    __host__ __device__ io_buffer_pool_type & get_io_pool() noexcept { return io_pool_; }
+};
+
+}
+}
+
+#include "impl/portal"
+
+SCADA_SWAP_EXPORT_SIMPLE_NS(scada::swap, portal)
+
+#endif

@@ -1,0 +1,28 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_CUDA_IMPL_BARRIER
+#define GDAKIS_IPC_CUDA_IMPL_BARRIER
+
+namespace gdakis::comm::ipc::cuda {
+
+template<thread_scope _Sco>
+template<typename... Args>
+__host__ __device__ inline barrier<_Sco>::barrier(Args &&... args) noexcept
+    : ::gdakis::spinbar<_Sco>(std::forward<Args>(args)...) {}
+
+template<thread_scope _Sco>
+template<typename... Args>
+inline typename barrier<_Sco>::ptr_type barrier<_Sco>::build(Args &&... args) noexcept {
+    return ipc::shmem<gdakis::umem::cuda, barrier>::alloc(std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+typename barrier<_Sco>::ptr_type barrier<_Sco>::import(const ancillary_type & ancillary) noexcept {
+    return ipc::shmem<gdakis::umem::cuda, barrier>::import(none_type(), ancillary);
+}
+
+}
+
+#endif

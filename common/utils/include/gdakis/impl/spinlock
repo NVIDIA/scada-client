@@ -1,0 +1,413 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IMPL_SPINLOCK
+#define GDAKIS_IMPL_SPINLOCK
+
+#include <gdakis/thread>
+
+#if defined(__CUDACC__)
+#  include <cooperative_groups.h>
+#endif
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(spinlock) {
+
+template<thread_scope _Sco>
+inline __host__ __device__ spinlock<_Sco>::spinlock() noexcept
+    : current_(ATOMIC_VAR_INIT(0)),
+      ticket_(ATOMIC_VAR_INIT(0)) {}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+inline
+    __host__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    spinlock<_Sco>::__host_critical_section(_Fn && fn, Args &&... args) noexcept {
+    unsigned ticket, current = 1;
+
+    ticket = ticket_.fetch_add(1);
+    do {
+        current = current_.load(memory_order_acquire);
+    } while (current != ticket);
+
+    auto ret = fn(std::forward<Args>(args)...);
+
+    current_.fetch_add(1, memory_order_release);
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+inline __host__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+spinlock<_Sco>::__host_critical_section(_Fn && fn, Args &&... args) noexcept {
+    unsigned ticket, current = 1;
+
+    ticket = ticket_.fetch_add(1);
+    do {
+        current = current_.load(memory_order_acquire);
+    } while (current != ticket);
+
+    fn(std::forward<Args>(args)...);
+
+    current_.fetch_add(1, memory_order_release);
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+__host__ __device__ inline auto spinlock<_Sco>::critical_section(_Fn && fn, Args &&... args) noexcept
+    -> decltype(fn(std::forward<Args>(args)...)) {
+#if defined(__CUDA_ARCH__)
+    return __device_critical_section(
+        cooperative_groups::coalesced_threads(), std::forward<_Fn>(fn), std::forward<Args>(args)...);
+#else
+    return __host_critical_section(std::forward<_Fn>(fn), std::forward<Args>(args)...);
+#endif
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline void spinlock<_Sco>::busy_wait(unsigned ticket) const noexcept {
+    unsigned current = current_.load(memory_order_acquire);
+    while (current != ticket) {
+        // This is what empirically seems to maximize the throughput of the radix-tree
+        unsigned delay = (ticket - current) >> 1;
+        this_thread::nanosleep(delay);
+        current = current_.load(memory_order_acquire);
+    }
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline void spinlock<_Sco>::lock() noexcept {
+    busy_wait(ticket_.fetch_add(1));
+
+#if !defined(NDEBUG) && defined(__CUDA_ARCH__)
+    thread_id_.store(threadIdx.x, memory_order_relaxed);
+    block_id_.store(blockIdx.x, memory_order_release);
+#endif
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline void spinlock<_Sco>::unlock() noexcept {
+#if !defined(NDEBUG)
+    unsigned current =
+#endif
+        current_.fetch_add(1, memory_order_release);
+#if !defined(NDEBUG)
+    assert(ticket_.load(memory_order_acquire) > current);
+#endif
+}
+
+#if defined(__CUDACC__)
+
+template<thread_scope _Sco>
+inline __device__ bool spinlock<_Sco>::is_locked(
+    unsigned & delay, const unsigned & current, const unsigned & ticket) noexcept {
+    bool ret = (current == ticket);
+    if (ret == false) {
+        this_thread::nanosleep(delay);
+        if ((delay << 1) < max_delay)
+            delay = delay << 1;
+        ;
+    }
+
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    spinlock<_Sco>::__device_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    unsigned id, delay = 1;
+    unsigned ticket, current;
+    std::invoke_result_t<_Fn, Args...> ret;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+    id = g.thread_rank();
+
+    ticket = cooperative_groups::invoke_one_broadcast(g, [this] { return ticket_.fetch_add(1); });
+
+    do {
+        current = current_.load(memory_order_acquire);
+        if (is_locked(delay, current, ticket)) {
+#  if !defined(NDEBUG)
+            thread_id_.store(threadIdx.x, memory_order_relaxed);
+            block_id_.store(blockIdx.x, memory_order_release);
+#  endif
+            for (unsigned n = 0; n < g.num_threads(); ++n) {
+                if (n == id)
+                    ret = fn(std::forward<Args>(args)...);
+                g.sync();
+            }
+            cooperative_groups::invoke_one(g, [this] { current_.fetch_add(1, memory_order_release); });
+        }
+    } while (current != ticket);
+    g.sync();
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    spinlock<_Sco>::__device_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    unsigned id, delay = 1;
+    unsigned ticket, current;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+    id = g.thread_rank();
+
+    ticket = cooperative_groups::invoke_one_broadcast(g, [this] {
+        auto ticket = ticket_.fetch_add(1);
+        return ticket;
+    });
+
+    do {
+        current = current_.load(memory_order_acquire);
+        if (is_locked(delay, current, ticket)) {
+#  if !defined(NDEBUG)
+            thread_id_.store(threadIdx.x, memory_order_relaxed);
+            block_id_.store(blockIdx.x, memory_order_release);
+#  endif
+            for (unsigned n = 0; n < g.num_threads(); ++n) {
+                if (n == id)
+                    fn(std::forward<Args>(args)...);
+                g.sync();
+            }
+            cooperative_groups::invoke_one(g, [this] { current_.fetch_add(1, memory_order_release); });
+        }
+    } while (current != ticket);
+    g.sync();
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    spinlock<_Sco>::__device_parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    unsigned delay = 1;
+    unsigned ticket, current;
+    std::invoke_result_t<_Fn, Args...> ret;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+    ticket = cooperative_groups::invoke_one_broadcast(g, [this] {
+        auto ticket = ticket_.fetch_add(1);
+        return ticket;
+    });
+
+    do {
+        current = current_.load(memory_order_acquire);
+        if (is_locked(delay, current, ticket)) {
+#  if !defined(NDEBUG)
+            cooperative_groups::invoke_one(g, [this] {
+                thread_id_.store(threadIdx.x, memory_order_relaxed);
+                block_id_.store(blockIdx.x, memory_order_release);
+            });
+#  endif
+            ret = fn(std::forward<Args>(args)...);
+            g.sync();
+            cooperative_groups::invoke_one(g, [this] { current_.fetch_add(1, memory_order_release); });
+        }
+    } while (current != ticket);
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    spinlock<_Sco>::__device_parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    unsigned delay = 1;
+    unsigned ticket, current;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+    ticket = cooperative_groups::invoke_one_broadcast(g, [this] {
+        auto ticket = ticket_.fetch_add(1);
+        return ticket;
+    });
+
+    do {
+        current = current_.load(memory_order_acquire);
+        if (is_locked(delay, current, ticket)) {
+#  if !defined(NDEBUG)
+            cooperative_groups::invoke_one(g, [this] {
+                thread_id_.store(threadIdx.x, memory_order_relaxed);
+                block_id_.store(blockIdx.x, memory_order_release);
+            });
+#  endif
+            fn(std::forward<Args>(args)...);
+            g.sync();
+            cooperative_groups::invoke_one(g, [this] { current_.fetch_add(1, memory_order_release); });
+        }
+    } while (current != ticket);
+}
+
+namespace detail {
+
+template<typename _Fn, size_t... Is>
+__host__ __device__ static inline constexpr auto index_apply_impl(_Fn f, std::index_sequence<Is...>) noexcept {
+    return f(std::integral_constant<size_t, Is> {}...);
+}
+
+template<size_t N, typename _Fn>
+__host__ __device__ static inline constexpr auto index_apply(_Fn f) {
+    return index_apply_impl(f, std::make_index_sequence<N> {});
+}
+
+template<typename Tuple, typename _Fn>
+__host__ __device__ static inline constexpr auto apply(Tuple t, _Fn f) {
+    return index_apply<std::tuple_size<Tuple> {}>([&](auto... Is) { return f(std::get<Is>(t)...); });
+}
+
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    spinlock<_Sco>::__device_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    std::invoke_result_t<_Fn, Args...> ret;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    ret = cooperative_groups::invoke_one_broadcast(g, [this, fn, tuple = std::make_tuple(std::forward<Args>(args)...)] {
+        unsigned ticket, current;
+        unsigned delay = 1;
+        std::invoke_result_t<_Fn, Args...> ret;
+
+        ticket = ticket_.fetch_add(1);
+        do {
+            current = current_.load(memory_order_acquire);
+            if (is_locked(delay, current, ticket)) {
+#  if !defined(NDEBUG)
+                thread_id_.store(threadIdx.x, memory_order_relaxed);
+                block_id_.store(blockIdx.x, memory_order_release);
+#  endif
+                ret = detail::apply(tuple, fn);
+                current_.fetch_add(1, memory_order_release);
+            }
+        } while (current != ticket);
+        return ret;
+    });
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    spinlock<_Sco>::__device_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    cooperative_groups::invoke_one(g, [this, fn, tuple = std::make_tuple(std::forward<Args>(args)...)] {
+        unsigned ticket, current;
+        unsigned delay = 1;
+
+        ticket = ticket_.fetch_add(1);
+        do {
+            current = current_.load(memory_order_acquire);
+            if (is_locked(delay, current, ticket)) {
+#  if !defined(NDEBUG)
+                thread_id_.store(threadIdx.x, memory_order_relaxed);
+                block_id_.store(blockIdx.x, memory_order_release);
+#  endif
+                detail::apply(tuple, fn);
+                current_.fetch_add(1, memory_order_release);
+            }
+        } while (current != ticket);
+    });
+    g.sync();
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline auto spinlock<_Sco>::critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept
+    -> decltype(fn(std::forward<Args>(args)...)) {
+    return __device_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline auto spinlock<_Sco>::parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept
+    -> decltype(fn(std::forward<Args>(args)...)) {
+    return __device_parallel_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline auto spinlock<_Sco>::single_thread_critical_section(
+    const _Cg & g, _Fn && fn, Args &&... args) noexcept -> decltype(fn(std::forward<Args>(args)...)) {
+    return __device_single_thread_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg>
+__device__ inline void spinlock<_Sco>::lock(const _Cg & g) noexcept {
+    unsigned id, ticket;
+
+    id = g.thread_rank();
+    ticket = cooperative_groups::invoke_one_broadcast(g, [this, &g] { return ticket_.fetch_add(g.num_threads()); });
+    ticket += id;
+    busy_wait(ticket);
+
+#  if !defined(NDEBUG)
+    thread_id_.store(threadIdx.x, memory_order_relaxed);
+    block_id_.store(blockIdx.x, memory_order_release);
+#  endif
+}
+
+template<thread_scope _Sco>
+template<typename _Cg>
+__device__ inline void spinlock<_Sco>::parallel_lock(const _Cg & g) noexcept {
+    cooperative_groups::invoke_one(g, [this, &g] {
+        unsigned ticket = ticket_.fetch_add(g.num_threads(), memory_order_acquire);
+        busy_wait(ticket);
+#  if !defined(NDEBUG)
+        thread_id_.store(threadIdx.x, memory_order_relaxed);
+        block_id_.store(blockIdx.x, memory_order_release);
+#  endif
+    });
+}
+
+template<thread_scope _Sco>
+template<typename _Cg>
+__device__ inline void spinlock<_Sco>::unlock(const _Cg & g) noexcept {
+    cooperative_groups::invoke_one(g, [this, &g] { current_.fetch_add(g.num_threads(), memory_order_release); });
+}
+
+#endif /* __CUDACC__ */
+
+}}
+
+#endif

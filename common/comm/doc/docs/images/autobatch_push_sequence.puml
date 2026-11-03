@@ -1,0 +1,93 @@
+' SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+' SPDX-License-Identifier: Apache-2.0
+
+@startuml
+title Autobatch v3 Push Operation
+
+actor "Thread" as T
+participant "Autobatch" as AB
+participant "Buffer" as BUF
+participant "Storage" as S
+
+note over T, S: Standard path (no cooperative groups)
+
+T -> AB: push(work_request)
+activate AB
+
+AB -> AB: enter()
+activate AB #DarkGray
+
+AB -> AB: Get current_buffer_
+AB -> BUF: try_enter()
+activate BUF
+
+BUF -> BUF: Atomically increment in_ counter
+BUF -> BUF: Check if commit bit set (bit 63)
+
+alt commit bit set
+    BUF --> AB: return false
+    AB -> AB: Try next buffer
+else commit bit not set
+    BUF -> BUF: Extract epoch (bits 60-62) and position
+    alt position < buffer size
+        BUF --> AB: return true with position & epoch
+    else position >= buffer size
+        BUF --> AB: return false
+        AB -> AB: Try next buffer
+    end
+end
+deactivate BUF
+
+AB --> AB: return entry token (buffer_idx, position, epoch)
+deactivate AB
+
+AB -> BUF: set(position, work_request)
+activate BUF
+BUF -> S: Store work request at position
+BUF --> AB: done
+deactivate BUF
+
+AB -> AB: exit(token)
+activate AB #DarkGray
+AB -> BUF: exit(epoch)
+activate BUF
+
+BUF -> BUF: Atomically increment out_ counter
+BUF -> BUF: Check current epoch matches token epoch
+
+alt epochs don't match
+    BUF --> AB: Buffer already committed, skip commitment
+else epochs match
+    BUF -> BUF: Check commitment conditions
+
+    alt buffer is full OR all entries validated
+        BUF -> BUF: Set commit bit in in_ counter (bit 63)
+        BUF -> BUF: process_and_reset_buffer()
+        activate BUF #DarkSalmon
+        
+        BUF -> S: commit(count)
+        activate S
+        S --> BUF: done
+        deactivate S
+        
+        BUF -> S: acquire()
+        activate S
+        S --> BUF: done
+        deactivate S
+        
+        BUF -> BUF: reset(epoch + 1)
+        BUF --> BUF: done
+        deactivate BUF
+    end
+end
+
+BUF --> AB: done
+deactivate BUF
+
+AB --> AB: done
+deactivate AB
+
+AB --> T: done
+deactivate AB
+
+@enduml 

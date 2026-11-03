@@ -1,0 +1,59 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_ADSC_POLICIES
+#define GDAKIS_ADSC_POLICIES
+
+#include <gdakis/adsc/__adsc_cuda_compat>
+#include <gdakis/adsc/__adsc_version>
+#include <optional>
+#include <tuple>
+
+GDAKIS_ADSC_SIMPLE_NS {
+GDAKIS_ADSC_UNIT(policies) {
+
+using undefined_policy_type = std::nullptr_t;
+static constexpr undefined_policy_type undefined_policy() {
+    return nullptr;
+}
+
+template<typename... Args>
+class policies_type {
+protected:
+    using arg_types = std::tuple<Args...>;
+    arg_types policies_;
+
+    enum class policy_offsets : unsigned {
+        miss = 0,
+        evict,
+        victim,
+        key_to_cl_id,
+        key_to_cl_offset,
+        cl_to_set,
+        nth_key_of_cl
+    };
+
+public:
+    __host__ __device__ policies_type(Args &&... args) noexcept;
+
+    __host__ __device__ auto miss() const noexcept;
+    __host__ __device__ auto evict() const noexcept;
+    __host__ __device__ auto victim() const noexcept;
+    __host__ __device__ auto key_to_cl_id() const noexcept;
+    __host__ __device__ auto key_to_cl_offset() const noexcept;
+    __host__ __device__ auto cl_to_set() const noexcept;
+    __host__ __device__ auto nth_key_of_cl() const noexcept;
+};
+
+template<typename... Args>
+__host__ __device__ static auto make_policies(Args &&... args) noexcept;
+
+}}
+
+#include "impl/policies"
+
+GDAKIS_ADSC_SIMPLE_EXPORT_NS(gdakis::adsc, policies)
+
+#endif
