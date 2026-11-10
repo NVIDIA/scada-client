@@ -1,0 +1,671 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP___IMPL_portal
+#define SCADA_SWAP___IMPL_portal
+
+#include <gdakis/cuda/warp>
+#include <gdakis/thread>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(portal) {
+
+#if defined(__CUDACC__)
+#  include <cooperative_groups.h>
+
+template<typename _Portal, typename _CL_Ref>
+__device__ static int victim_fn(_Portal * portal, _CL_Ref & ref) {
+    return portal->victim_handler(ref);
+}
+#endif
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline constexpr __host__ __device__
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::index_type::operator std::uint64_t() const noexcept {
+    return (static_cast<uint64_t>(id) << 48) | offset;
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline constexpr __host__ __device__ typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::index_type
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::index_type::operator+(const std::size_t i) const noexcept {
+    return index_type { .offset = offset + i, .id = id };
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline constexpr __host__ __device__ typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::index_type
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::index_type::invalid() noexcept {
+    return index_type { .offset = 0xffffffffffff, .id = 0xffff };
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline constexpr __host__ __device__
+typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::accessor::reference
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::accessor::access(
+    data_handle_type p, std::size_t i) const noexcept {
+    return *(p + i);
+}
+
+template<>
+struct portal_traits<device_type::cpu> {
+    using allocator_type = gdakis::umem::cpu;
+};
+
+#if __has_include(<cuda_runtime_api.h>) || defined(__DOXYGEN__)
+template<>
+struct portal_traits<device_type::cuda> {
+    using allocator_type = gdakis::umem::cuda;
+};
+#endif
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<typename _Store>
+inline result<typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::handle_type>
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::build(
+    _Store & store, std::size_t autobatch_size, std::size_t num_cls) noexcept {
+    constexpr auto total_bytes = sizeof(value_type) * cl_size;
+    static_assert(total_bytes % 3072 == 0 || (total_bytes >= 512 && (total_bytes & (total_bytes - 1)) == 0),
+        "Cacheline size must be either a multiple of 3072 or a power of 2 and >= 512 (ie, supported access "
+        "granularity)");
+    bool is_dma = true;
+    auto io_buffer_pool = io_buffer_pool_handle::build(
+        num_cls, [] __host__ __device__(unsigned, cl_type * data) {},
+        [] __host__ __device__(unsigned id, typename io_buffer_pool_type::status_type * status) {
+            gdakis::atomic_ref<status_type, _Sco>(*status).store(status_type::pending, gdakis::memory_order_relaxed);
+        },
+        is_dma);
+    if (io_buffer_pool.is_err()) {
+        SWAP_LOG(LOCSTR, "data io buffer pool build in error state during portal build");
+        return result<handle_type>::err(io_buffer_pool.err());
+    }
+
+    auto ret = io_buffer_pool.ok().send_to_server(store.socket()).sync();
+    if (ret.is_err()) {
+        SWAP_LOG(LOCSTR, "data io buffer pool registration in error state during portal build");
+        return result<handle_type>::err(ret.err());
+    }
+
+    auto autobatch = autobatch_type::handle::build(autobatch_size);
+    if (autobatch.is_err()) {
+        SWAP_LOG(LOCSTR, "data autobatch build in error state during portal build");
+        return result<handle_type>::err(autobatch.err());
+    }
+
+    ret = autobatch.ok().send_to_server(store.socket()).sync();
+    if (ret.is_err()) {
+        SWAP_LOG(LOCSTR, "data autobatch registration in error state during portal build");
+        return result<handle_type>::err(ret.err());
+    }
+
+    auto adsc = adsc_type::template build<typename portal_traits<_Device>::allocator_type>(
+        num_cls, reinterpret_cast<value_type *>(io_buffer_pool.ok().data()));
+
+    return result<handle_type>::ok(handle_type(autobatch.take_ok(), io_buffer_pool.take_ok(), std::move(adsc)));
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::handle_type::handle_type(
+    autobatch_handle && autobatch, io_buffer_pool_handle && io_buffers, adsc_handle && adsc) noexcept
+    : autobatch_(std::move(autobatch)),
+      io_buffers_(std::move(io_buffers)),
+      adsc_(std::move(adsc)),
+      portal_(gdakis::umem::mem<typename portal_traits<_Device>::allocator_type, portal>::alloc(
+          autobatch_.get(), io_buffers_.get(), adsc_.get())) {}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways> *
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::handle_type::get() const noexcept {
+    return portal_.get();
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline void portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::handle_type::sync(
+    const gdakis::memory_order order) const noexcept {
+    if (order == gdakis::memory_order_acquire)
+        adsc_.invalidate_cache();
+    else if (order == gdakis::memory_order_release) {
+        auto portal_ptr = portal_.get();
+        if constexpr (_Device == device_type::cuda) {
+            adsc_.flush_cache(gdakis::adsc::make_policies(
+                gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(),
+                [portal_ptr] __device__(adsc_cl_ref_type & cl_ref) { return victim_fn(portal_ptr, cl_ref); },
+                gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(),
+                gdakis::adsc::undefined_policy()));
+        } else {
+            adsc_.flush_cache(gdakis::adsc::make_policies(
+                gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(),
+                [portal_ptr](adsc_cl_ref_type & cl_ref) { return portal_ptr->victim_handler(cl_ref); },
+                gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(),
+                gdakis::adsc::undefined_policy()));
+        }
+    }
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<typename _Store>
+inline typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::span
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::handle_type::make_span(
+    const slab<_Tp, _Store> & slab) noexcept {
+    return span(pointer_type(portal_.get(), index_type { 0, slab.id() }), slab.size());
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::portal(
+    autobatch_type * autobatch, io_buffer_pool_type && io_pool, adsc_type * adsc) noexcept
+    : autobatch_(autobatch),
+      io_pool_(std::move(io_pool)),
+      adsc_(adsc) {}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ result<_Tp> portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::get(
+    index_type index) noexcept {
+    _Tp temp;
+
+    auto ret = adsc_->get(index, temp,
+        gdakis::adsc::make_policies([this](adsc_cl_ref_type & cl_ref) { return this->miss_handler(cl_ref); },
+            gdakis::adsc::undefined_policy(),
+            [this](adsc_cl_ref_type & cl_ref) { return this->victim_handler(cl_ref); },
+            [this](const index_type key) { return this->key_to_cl_id(key); },
+            [this](const index_type key) { return this->key_to_cl_offset(key); },
+            [this](const index_type cl_id, const unsigned num_sets) { return this->cl_to_set(cl_id, num_sets); },
+            [this](const index_type cl_id, const unsigned n) { return this->nth_key_of_cl(cl_id, n); }));
+    if (ret)
+        return result<_Tp>::err(ret);
+    return result<_Tp>::ok(temp);
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ result<none_type> portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::put(
+    index_type index, const _Tp & value) noexcept {
+    auto ret = adsc_->put(index, value,
+        gdakis::adsc::make_policies([this](adsc_cl_ref_type & cl_ref) { return this->miss_handler(cl_ref); },
+            gdakis::adsc::undefined_policy(),
+            [this](adsc_cl_ref_type & cl_ref) { return this->victim_handler(cl_ref); },
+            [this](const index_type key) { return this->key_to_cl_id(key); },
+            [this](const index_type key) { return this->key_to_cl_offset(key); },
+            [this](const index_type cl_id, const unsigned num_sets) { return this->cl_to_set(cl_id, num_sets); },
+            [this](const index_type cl_id, const unsigned n) { return this->nth_key_of_cl(cl_id, n); }));
+    if (ret)
+        return result<none_type>::err(ret);
+    return result<none_type>::ok<>();
+}
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<typename _Cg>
+inline __device__ result<none_type> portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::get_group(
+    _Cg & group, index_type index, _Tp & val) noexcept {
+    namespace cg = cooperative_groups;
+    auto ret = adsc_->get_group(group, index, val,
+        gdakis::adsc::make_policies(
+            [this](const _Cg & mask, adsc_cl_ref_type & cl_ref) {
+                return cg::invoke_one_broadcast(mask, [this, &cl_ref] { return this->miss_handler(cl_ref); });
+            },
+            gdakis::adsc::undefined_policy(),
+            [this](const _Cg & mask, adsc_cl_ref_type & cl_ref) {
+                return cg::invoke_one_broadcast(mask, [this, &cl_ref] { return this->victim_handler(cl_ref); });
+            },
+            [this](const index_type key) { return this->key_to_cl_id(key); },
+            [this](const index_type key) { return this->key_to_cl_offset(key); },
+            [this](const index_type cl_id, const unsigned num_sets) { return this->cl_to_set(cl_id, num_sets); },
+            [this](const index_type cl_id, const unsigned n) { return this->nth_key_of_cl(cl_id, n); }));
+    if (ret)
+        return result<none_type>::err(ret);
+    return result<none_type>::ok<>();
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<typename _Cg>
+inline __device__ result<none_type> portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::put_group(
+    _Cg & group, index_type index, const _Tp & value) noexcept {
+    namespace cg = cooperative_groups;
+    auto ret = adsc_->put_group(group, index, value,
+        gdakis::adsc::make_policies(
+            [this](const _Cg & mask, adsc_cl_ref_type & cl_ref) {
+                return cg::invoke_one_broadcast(mask, [this, &cl_ref] { return this->miss_handler(cl_ref); });
+            },
+            gdakis::adsc::undefined_policy(),
+            [this](const _Cg & mask, adsc_cl_ref_type & cl_ref) {
+                return cg::invoke_one_broadcast(mask, [this, &cl_ref] { return this->victim_handler(cl_ref); });
+            },
+            [this](const index_type key) { return this->key_to_cl_id(key); },
+            [this](const index_type key) { return this->key_to_cl_offset(key); },
+            [this](const index_type cl_id, const unsigned num_sets) { return this->cl_to_set(cl_id, num_sets); },
+            [this](const index_type cl_id, const unsigned n) { return this->nth_key_of_cl(cl_id, n); }));
+
+    if (ret)
+        return result<none_type>::err(ret);
+    return result<none_type>::ok<>();
+}
+
+#endif
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ int portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::miss_handler(
+    adsc_cl_ref_type & cl_ref) noexcept {
+    auto cl_line = cl_ref.cl_buffer_offset();
+    auto index = cl_ref.cl_id();
+    auto status_atom = gdakis::atomic_ref<status_type, _Sco>(this->io_pool_.status()[cl_line]);
+    status_atom.store(status_type::pending);
+    this->autobatch_->push([&](wqe_type & wqe) {
+        wqe.op_ = operation::get;
+        wqe.data_.slab_id_ = index.id;
+        wqe.data_.key_ = index.offset;
+        wqe.data_.n_elems_ = 1;
+        wqe.data_.io_id_ = this->io_pool_.id();
+        wqe.data_.io_offset_ = cl_line;
+        wqe.data_.access_granularity_ = access_granularity;
+    });
+
+    unsigned backoff = min_backoff_;
+    status_type status;
+    do {
+        status = status_atom.load(gdakis::memory_order_acquire);
+        if (status != status_type::pending)
+            break;
+
+        gdakis::this_thread::nanosleep(backoff);
+        if (backoff < max_backoff_)
+            backoff *= 2;
+    } while (true);
+    if (status != status_type::ok)
+        return -EIO;
+    return 0;
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ int portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::victim_handler(
+    adsc_cl_ref_type & cl_ref) noexcept {
+    auto cl_line = cl_ref.cl_buffer_offset();
+    auto index = cl_ref.cl_id();
+    if (cl_ref.is_dirty()) {
+        auto status_atom = gdakis::atomic_ref<status_type, _Sco>(this->io_pool_.status()[cl_line]);
+        status_atom.store(status_type::pending);
+        this->autobatch_->push([&](wqe_type & wqe) {
+            wqe.op_ = operation::put;
+            wqe.data_.slab_id_ = index.id;
+            wqe.data_.key_ = index.offset;
+            wqe.data_.n_elems_ = 1;
+            wqe.data_.io_id_ = this->io_pool_.id();
+            wqe.data_.io_offset_ = cl_line;
+            wqe.data_.access_granularity_ = access_granularity;
+        });
+
+        unsigned backoff = min_backoff_;
+        status_type status;
+        do {
+            status = status_atom.load(gdakis::memory_order_acquire);
+            if (status != status_type::pending)
+                break;
+
+            gdakis::this_thread::nanosleep(backoff);
+            if (backoff < max_backoff_)
+                backoff *= 2;
+        } while (true);
+
+        if (status != status_type::ok)
+            return -EIO;
+    }
+    return 0;
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::adsc_type::cl_id_type
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::key_to_cl_id(const index_type key) const noexcept {
+    return index_type { .offset = key.offset / cl_size, .id = key.id };
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ unsigned portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::key_to_cl_offset(
+    const index_type key) const noexcept {
+    return key.offset % cl_size;
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::adsc_type::set_id_type
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::cl_to_set(
+    const index_type cl_id, const unsigned num_sets) const noexcept {
+    return cl_id.offset % num_sets;
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __host__ __device__ typename portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::index_type
+portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::nth_key_of_cl(
+    const index_type cl_id, const unsigned n) const noexcept {
+    return index_type { .offset = cl_id.offset * cl_size + n, .id = cl_id.id };
+}
+
+// ========== Async I/O Implementation ==========
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+inline __device__ bool portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::check_io_completion(
+    apply_sm::state_t & state) noexcept {
+    // Load status with acquire semantics
+    auto status_atom = gdakis::atomic_ref<status_type, _Sco>(this->io_pool_.status()[state.cl_line()]);
+    auto status = status_atom.load(gdakis::memory_order_acquire);
+
+    if (status != status_type::pending && status == status_type::ok) {
+        // I/O complete
+        // printf("DEBUG: I/O complete, status=%d\n", status);
+        return true;
+    } else if (status != status_type::pending && status == status_type::invalid) {
+        // I/O failed
+        //printf("ERROR: I/O failed, status=%d\n", status);
+        return false;
+    }
+
+    return false;
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<typename _Cg>
+inline __device__ void portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::release_cl(
+    const _Cg & group, apply_sm::state_t & state) noexcept {
+    namespace cg = cooperative_groups;
+
+    // Use single-thread group for ADSC operations to avoid group.sync() issues
+    auto thread_group = cg::this_thread();
+
+    // Unlock cache line - call cache's async_epilogue
+    adsc_->async_epilogue(thread_group, state.set_id(), state.way());
+
+    state.holding_cl_lock() = false;
+    // Mark io_pool slot as available if this was I/O path
+    if (!state.is_cache_hit()) {
+        // Note: Still use original group param since this is just setting a flag
+        cg::invoke_one_broadcast(group, [this, &state] {
+            auto status_atom = gdakis::atomic_ref<status_type, _Sco>(this->io_pool_.status()[state.cl_line()]);
+            status_atom.store(status_type::invalid);
+            return 0;
+        });
+    }
+}
+
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<typename _Cg>
+inline __device__ result<none_type> portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::access_async_group(
+    const _Cg & group, index_type idx, apply_sm::state_t & state) noexcept {
+    namespace cg = cooperative_groups;
+    auto thread_group = cg::this_thread();
+
+    if (state.is_invalid()) {
+        // Compute cache line ID
+        auto cl_id = key_to_cl_id(idx);
+        typename adsc_type::set_id_type set_id;
+        unsigned way;
+        bool is_cache_hit;
+
+        // Call cache's access_async_group with single-thread group
+        int ret = adsc_->access_async_group(thread_group, cl_id, set_id, way, is_cache_hit,
+            gdakis::adsc::make_policies(
+                gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(), gdakis::adsc::undefined_policy(),
+                [this](const index_type key) { return this->key_to_cl_id(key); },
+                [this](const index_type key) { return this->key_to_cl_offset(key); },
+                [this](const index_type cl_id, const unsigned num_sets) { return this->cl_to_set(cl_id, num_sets); },
+                [this](const index_type cl_id, const unsigned n) { return this->nth_key_of_cl(cl_id, n); }),
+            [this](const auto & g, const typename adsc_type::set_id_type & sid, const unsigned w,
+                const typename adsc_type::cl_id_type & cid, const auto & policies) {
+                return cg::invoke_one_broadcast(
+                    g, [this, sid, w] { return this->victim_handler(this->adsc_->cl_ref(sid, w)); });
+            });
+
+        if (ret != 0) {
+            // Failed to acquire cache line
+            state.holding_cl_lock() = false;
+            state.set_invalid();
+        } else {
+            // Update state with cache acquisition results
+            state.set_id() = set_id;
+            state.way() = way;
+            state.holding_cl_lock() = true;
+            state.is_cache_hit() = is_cache_hit;
+
+            if (state.is_cache_hit()) {
+                // Cache hit - data is ready immediately
+                state.set_ready();
+            } else {
+                // This MUST match how ADSC computes cl_ref index: set_id * num_ways + way
+                unsigned cl_line = set_id * adsc_type::num_ways + way;
+                state.cl_line() = cl_line;
+                cg::invoke_one_broadcast(thread_group, [this, idx, cl_line, &state] {
+                    auto status_atom = gdakis::atomic_ref<status_type, _Sco>(this->io_pool_.status()[cl_line]);
+                    status_atom.store(status_type::pending);
+                    this->autobatch_->push([this, idx, cl_line](wqe_type & wqe) {
+                        wqe.op_ = operation::get;
+                        wqe.data_.slab_id_ = idx.id;
+                        wqe.data_.key_ = idx.offset;
+                        wqe.data_.n_elems_ = 1;
+                        wqe.data_.io_id_ = this->io_pool_.id();
+                        wqe.data_.io_offset_ = cl_line;
+                        wqe.data_.access_granularity_ = access_granularity;
+                    });
+                    return 0;
+                });
+                state.set_valid();
+            }
+        }
+    }
+
+    // Return error status, but only AFTER all threads are synchronized
+    if (!state.is_released() && state.is_invalid()) {
+        return result<none_type>::err(-1);
+    }
+    return result<none_type>::ok<>();
+}
+
+// coop_apply implementation - cooperative work sharing version
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<unsigned TILESIZE, unsigned BLOCKSIZE, typename _Cg, typename _Fn>
+inline __device__ result<none_type> portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::coop_apply(_Cg & group,
+    apply_sm::state_t * states, index_type idx, _Tp * scratch_buffers, _Fn && callback, bool active) noexcept {
+    namespace cg = cooperative_groups;
+
+    const unsigned tid = group.thread_rank();
+    const unsigned group_size = group.size();
+
+    // Per-tile shared memory for broadcasting all_released flag
+    // MUST be atomic to ensure visibility across threads in optimized builds
+    constexpr unsigned TILES_PER_BLOCK = BLOCKSIZE / TILESIZE;
+    __shared__ alignas(cuda::atomic<bool, cuda::thread_scope_block>) unsigned char
+        all_released_flags_raw[TILES_PER_BLOCK * sizeof(cuda::atomic<bool, cuda::thread_scope_block>)];
+    auto * all_released_flags
+        = reinterpret_cast<cuda::atomic<bool, cuda::thread_scope_block> *>(all_released_flags_raw);
+    const unsigned tile_id = group.meta_group_rank();
+
+    // Construct and initialize atomic flag for this tile using placement new (only thread 0 of each tile)
+    if (tid == 0) {
+        new (&all_released_flags[tile_id]) cuda::atomic<bool, cuda::thread_scope_block>(false);
+    }
+    // CRITICAL: Block-level sync to ensure ALL tiles have initialized their atomics before ANY tile proceeds
+    __syncthreads();
+
+    // If thread is not active, mark as released and skip issuing I/O requests
+    if (!active) {
+        states[tid].set_released();
+    }
+
+    group.sync();
+    access_async_group(group, idx, states[tid]);
+    group.sync();
+
+    bool all_released = false;
+
+    while (!all_released) {
+        for (unsigned i = 0; i < group_size; i++) {
+            auto & work_state = states[i];
+            group.sync();
+            if (work_state.is_valid()) {
+                // Check I/O completion cooperatively (one thread checks and sets state)
+                if (group.thread_rank() == 0) {
+                    if (check_io_completion(work_state)) {
+                        work_state.set_ready();
+                    }
+                }
+            }
+            group.sync();
+            if (work_state.is_ready()) {
+                // Group cooperates to copy to scratchbuffer
+                adsc_->copy_cl_data(
+                    group, work_state.set_id(), work_state.way(), &scratch_buffers[i], sizeof(value_type));
+                group.sync();
+
+                if (group.thread_rank() == 0) {
+                    work_state.set_released();
+                    assert(work_state.holding_cl_lock() == true && "work_state should be holding the cl lock");
+                    release_cl(group, work_state);
+                }
+                group.sync();
+                // Application must copy from scratch buffer to final destination
+                callback(group, scratch_buffers[i], i);
+                group.sync();
+            }
+        }
+        group.sync();
+        access_async_group(group, idx, states[tid]);
+        group.sync();
+
+        // Each tile uses its own slot in the shared array (indexed by tile_id)
+        if (tid == 0) {
+            bool all_done = true;
+            for (unsigned i = 0; i < group_size; i++) {
+                if (!states[i].is_released()) {
+                    all_done = false;
+                    break;
+                }
+            }
+            all_released_flags[tile_id].store(all_done, cuda::memory_order_release);
+        }
+
+        group.sync();
+        all_released = all_released_flags[tile_id].load(cuda::memory_order_acquire);
+    }
+
+    group.sync();
+    return result<none_type>::ok<>();
+}
+
+// coop_apply_target implementation - cooperative work sharing version targeting destination buffers
+template<typename _Tp, std::size_t _CL_Size, device_type _Device, thread_scope _Sco, std::size_t _NumBuffers,
+    unsigned _Ways>
+template<unsigned TILESIZE, unsigned BLOCKSIZE, typename _Cg, typename _Fn>
+inline __device__ result<none_type> portal<_Tp, _CL_Size, _Device, _Sco, _NumBuffers, _Ways>::coop_apply_target(
+    _Cg & group, apply_sm::state_t * states, index_type idx, _Tp * destination_buffers, _Fn && callback,
+    bool active) noexcept {
+    namespace cg = cooperative_groups;
+
+    const unsigned tid = group.thread_rank();
+    const unsigned group_size = group.size();
+
+    // Per-tile shared memory for broadcasting all_released flag
+    // MUST be atomic to ensure visibility across threads in optimized builds
+    constexpr unsigned TILES_PER_BLOCK = BLOCKSIZE / TILESIZE;
+    __shared__ alignas(cuda::atomic<bool, cuda::thread_scope_block>) unsigned char
+        all_released_flags_raw[TILES_PER_BLOCK * sizeof(cuda::atomic<bool, cuda::thread_scope_block>)];
+    auto * all_released_flags
+        = reinterpret_cast<cuda::atomic<bool, cuda::thread_scope_block> *>(all_released_flags_raw);
+    const unsigned tile_id = group.meta_group_rank();
+
+    // Construct and initialize atomic flag for this tile using placement new (only thread 0 of each tile)
+    if (tid == 0) {
+        new (&all_released_flags[tile_id]) cuda::atomic<bool, cuda::thread_scope_block>(false);
+    }
+    // CRITICAL: Block-level sync to ensure ALL tiles have initialized their atomics before ANY tile proceeds
+    __syncthreads();
+
+    // If thread is not active, mark as released and skip issuing I/O requests
+    if (!active) {
+        states[tid].set_released();
+    }
+
+    group.sync();
+    access_async_group(group, idx, states[tid]);
+    group.sync();
+
+    bool all_released = false;
+
+    while (!all_released) {
+        for (unsigned i = 0; i < group_size; i++) {
+            auto & work_state = states[i];
+            group.sync();
+            if (work_state.is_valid()) {
+                // Check I/O completion cooperatively (one thread checks and sets state)
+                if (group.thread_rank() == 0) {
+                    if (check_io_completion(work_state)) {
+                        work_state.set_ready();
+                    }
+                }
+            }
+            group.sync();
+            if (work_state.is_ready()) {
+                // Group cooperates to copy directly to destination buffer
+                adsc_->copy_cl_data(
+                    group, work_state.set_id(), work_state.way(), &destination_buffers[i], sizeof(value_type));
+                group.sync();
+
+                if (group.thread_rank() == 0) {
+                    work_state.set_released();
+                    assert(work_state.holding_cl_lock() == true && "work_state should be holding the cl lock");
+                    release_cl(group, work_state);
+                }
+                group.sync();
+                callback(group, destination_buffers[i], i);
+                group.sync();
+            }
+        }
+        group.sync();
+        access_async_group(group, idx, states[tid]);
+        group.sync();
+
+        // Each tile uses its own slot in the shared array (indexed by tile_id)
+        if (tid == 0) {
+            bool all_done = true;
+            for (unsigned i = 0; i < group_size; i++) {
+                if (!states[i].is_released()) {
+                    all_done = false;
+                    break;
+                }
+            }
+            all_released_flags[tile_id].store(all_done, cuda::memory_order_release);
+        }
+
+        group.sync();
+        all_released = all_released_flags[tile_id].load(cuda::memory_order_acquire);
+    }
+
+    group.sync();
+    return result<none_type>::ok<>();
+}
+
+#endif
+
+}}
+
+#endif

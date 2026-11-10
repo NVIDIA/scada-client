@@ -1,0 +1,131 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_DMA
+#define GDAKIS_UMEM_DMA
+
+#include <gdakis/umem/impl/types>
+
+#include <functional>
+#include <memory>
+
+#include <errno.h>
+
+//! @file gdakis/umem/dma
+
+namespace gdakis::umem {
+
+//! @brief Abstracts out a file descriptor
+class fd {
+protected:
+    //! @brief File descriptor
+    int fd_;
+
+    //! @brief Deleted copy constructor
+    fd(const fd &) = delete;
+
+    //! @brief Grant access to buffer types
+    template<typename, template<typename> typename>
+    friend class buffer;
+
+public:
+    //! @brief Default constructor
+    //! @param value File descriptor
+    constexpr fd(int value) noexcept;
+
+    //! @brief Move constructor
+    //! @param other File descriptor to move
+    constexpr fd(fd && other) noexcept;
+
+    //! @brief Default destructor
+    ~fd() noexcept;
+
+    //! @brief Return the file handle value if valid
+    //! @return File descriptor or -1 if not valid
+    constexpr int handle() const;
+
+    //! @brief Return error code associated to the file descriptor
+    //! @return Error code or 0 if the file descriptor is valid
+    constexpr int err() const;
+
+    //! @brief Move assignment
+    //! @param other File descriptor to move
+    //! @return Reference to the file descriptor
+    fd & operator=(fd && other) noexcept;
+};
+
+//! @brief DMA buffer
+//! @tparam _Tp Type of the object hold in the DMA buffer
+//! @tparam _Ptr Pointer type to the memory in the DMA buffer
+template<typename _Tp = void, template<typename> typename _Ptr = ptr_type>
+class buffer {
+public:
+    //! @brief Pointer to the DMA memory
+    using mem = _Ptr<_Tp>;
+
+protected:
+    //! @brief File descriptor holding the DMA allocation
+    fd fd_;
+    //! @brief Pointer to the DMA allocation
+    mem mem_;
+    //! @brief Size of the DMA allocation
+    std::size_t size_;
+
+public:
+    //! @brief Default constructor
+    //! @param fd File descriptor
+    //! @param ptr Pointer to DMA memory
+    buffer(fd && fd, ptr_type<_Tp> && ptr) noexcept;
+
+    //! @brief Invalid buffer constructor
+    //! @param err Error code
+    buffer(int err = -ENOENT) noexcept;
+
+    //! @brief Move constructor
+    //! @param other Buffer to move
+    buffer(buffer && other) noexcept;
+
+    //! @brief Default destructor
+    ~buffer();
+
+    //! @brief Get a pointer to the DMA memory
+    //! @return Pointer to DMA memory
+    _Tp * get() const noexcept;
+
+    //! @brief Get file descriptor backing the DMA allocation
+    //! @return File descriptor value
+    constexpr int handle() const noexcept;
+
+    //! @brief Get error code associated to the invalid DMA allocation
+    //! @return Error code
+    constexpr int retval() const noexcept;
+
+    //! @brief Get size of the DMA allocation
+    //! @return Allocation size
+    constexpr std::size_t size() const noexcept;
+
+    //! @brief Equality operator for nullptr
+    //! @return True if the pointer is nullptr
+    constexpr bool operator==(std::nullptr_t) const noexcept;
+
+    //! @brief Inequality operator for nullptr
+    //! @return True if the pointer is not nullptr
+    constexpr bool operator!=(std::nullptr_t) const noexcept;
+
+    //! @brief Move assignment operator
+    //! @param other Buffer to move
+    //! @return Reference to the buffer
+    buffer & operator=(buffer && other) noexcept = default;
+
+    //! @brief Assignment operator for nullptr
+    //! @return Reference to the buffer
+    buffer & operator=(std::nullptr_t) noexcept;
+};
+
+}
+
+#include "impl/dma"
+
+#endif

@@ -1,0 +1,33 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_THREAD
+#define GDAKIS_CUDA_THREAD
+
+#include <gdakis/__utils_version>
+#include <gdakis/thread>
+
+//! @file gdakis/cuda/thread
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(thread) {
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+//! @brief Extension of `gdakis::thread` to add CUDA-specific functionality
+struct this_thread : public gdakis::this_thread {
+    //! @brief Check if the calling thread is the leader of the threads within a thread mask
+    //! @param active_mask Mask of threads executing in lock-step within the warp
+    //! @return True if the calling thread is the leader, false otherwise
+    __device__ static inline bool is_leader(unsigned active_mask) noexcept;
+};
+
+#endif /* __CUDACC__ */
+
+}}
+
+#include "impl/thread"
+
+#endif

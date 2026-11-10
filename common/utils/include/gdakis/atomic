@@ -1,0 +1,121 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_ATOMIC
+#define GDAKIS_ATOMIC
+
+#include <gdakis/__utils_version>
+
+//! @file gdakis/atomic
+
+#if __has_include(<cuda/atomic>)
+#  include <cuda/atomic>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(atomic) {
+using thread_scope = ::cuda::thread_scope;
+constexpr thread_scope thread_scope_system = ::cuda::thread_scope_system;
+constexpr thread_scope thread_scope_device = ::cuda::thread_scope_device;
+// CUDA does not yet expose thread_scope_cluster; using device scope as a conservative fallback.
+constexpr thread_scope thread_scope_cluster = ::cuda::thread_scope_device;
+constexpr thread_scope thread_scope_block = ::cuda::thread_scope_block;
+constexpr thread_scope thread_scope_thread = ::cuda::thread_scope_thread;
+
+using memory_order = ::cuda::memory_order;
+constexpr memory_order memory_order_relaxed = ::cuda::memory_order_relaxed;
+constexpr memory_order memory_order_consume = ::cuda::memory_order_consume;
+constexpr memory_order memory_order_acquire = ::cuda::memory_order_acquire;
+constexpr memory_order memory_order_release = ::cuda::memory_order_release;
+constexpr memory_order memory_order_acq_rel = ::cuda::memory_order_acq_rel;
+constexpr memory_order memory_order_seq_cst = ::cuda::memory_order_seq_cst;
+
+template<typename _Tp, thread_scope _Sco = thread_scope_system>
+using atomic = ::cuda::atomic<_Tp, _Sco>;
+
+template<typename _Tp, thread_scope _Sco = thread_scope_system>
+using atomic_ref = ::cuda::atomic_ref<_Tp, _Sco>;
+
+const auto atomic_thread_fence = ::cuda::atomic_thread_fence;
+}}
+
+#else
+
+#  include <atomic>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(atomic) {
+
+//! @brief Type to define the synchronization scope when CUDA is not present
+enum class thread_scope {
+    //! @brief System scope : threads running on CPUs, GPUs, and DPUs will observe side effects
+    system,
+    //! @brief Device scope : threads running on the same CPU, GPU, or DPU  observe side effects
+    device,
+    //! @brief Cluster scope : threads running on the same GPC in the GPU observe side effects
+    cluster,
+    //! @brief Block scope : threads running on the same SM in the GPU observe side effects
+    block,
+    //! @brief Thread scope : calling thread
+    thread
+};
+//! @brief Constant alias for thread_scope::system
+constexpr thread_scope thread_scope_system = thread_scope::system;
+//! @brief Constant alias for thread_scope::device
+constexpr thread_scope thread_scope_device = thread_scope::device;
+//! @brief Constant alias for thread_scope::cluster
+constexpr thread_scope thread_scope_cluster = thread_scope::cluster;
+//! @brief Constant alias for thread_scope::block
+constexpr thread_scope thread_scope_block = thread_scope::block;
+//! @brief Constant alias for thread_scope::thread
+constexpr thread_scope thread_scope_thread = thread_scope::thread;
+
+//! @brief Alias to use std::memory_order within the gdakis namespace
+using memory_order = ::std::memory_order;
+//! @brief Constant alias for std::memory_order_relaxed
+constexpr memory_order memory_order_relaxed = ::std::memory_order_relaxed;
+//! @brief Constant alias for std::memory_order_consume
+constexpr memory_order memory_order_consume = ::std::memory_order_consume;
+//! @brief Constant alias for std::memory_order_acquire
+constexpr memory_order memory_order_acquire = ::std::memory_order_acquire;
+//! @brief Constant alias for std::memory_order_release
+constexpr memory_order memory_order_release = ::std::memory_order_release;
+//! @brief Constant alias for std::memory_order_acq_rel
+constexpr memory_order memory_order_acq_rel = ::std::memory_order_acq_rel;
+//! @brief Constant alias for std::memory_order_seq_cst
+constexpr memory_order memory_order_seq_cst = ::std::memory_order_seq_cst;
+
+//! @brief Type alias for std::atomic that also accepts a thread_scope
+//!
+//! This type alias achieves the same semantics as cuda::atomic, so we can
+//! use the same code whether CUDA is enabled or not
+//! @tparam _Tp Type of the atomic
+//! @tparam _Sco Thread scope
+template<typename _Tp, thread_scope _Sco = thread_scope_system>
+using atomic = ::std::atomic<_Tp>;
+
+//! @brief Type alias for std::atomic_ref that also accepts a thread_scope
+//!
+//! This type alias achieves the same semantics as cuda::atomic, so we can
+//! use the same code whether CUDA is enabled or not
+//! @tparam _Tp Type of the atomic
+//! @tparam _Sco Thread scope
+template<typename _Tp, thread_scope _Sco = thread_scope_system>
+using atomic_ref = ::std::atomic_ref<_Tp>;
+
+//! @brief Function alias for atomic thread fences that is API compatible
+//! with cuda::atomic_thread_fence
+//! @param mem_order Memory order enforced by the barrier
+//! @param sco Thread scope
+static inline auto atomic_thread_fence(memory_order mem_order, thread_scope sco) {
+    ::std::atomic_thread_fence(mem_order);
+}
+
+}}
+
+#endif
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, atomic)
+
+#endif

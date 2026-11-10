@@ -1,0 +1,55 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_BITS
+#define GDAKIS_BITS
+
+#include <sys/types.h>
+
+#include <type_traits>
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+
+//! @file gdakis/bits
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(bits) {
+
+//! @brief Population count
+//! @tparam _Tp Numeric type
+//! @param value Binary value to compute the population count over
+//! @return Number of bits set in the value
+template<typename _Tp>
+__host__ __device__ static inline unsigned popc(const _Tp & value) noexcept;
+
+//! @brief Swap endianness
+//! @tparam _Tp Numeric type
+//! @param value Value to swap endianness
+//! @returns Value in the inverse endianness
+template<typename _Tp>
+__host__ __device__ static inline _Tp bswap(const _Tp & value) noexcept;
+
+//! @brief Find first set bit
+//! @tparam _Tp Numeric type
+//! @param value Value to find the first set bit
+//! @return Index of the first set bit, or -1 is no bits are set
+template<typename _Tp>
+__host__ __device__ static inline ssize_t ffs(const _Tp & value) noexcept;
+
+//! @brief Find last set bit
+//! @tparam _Tp Numeric type
+//! @param value Value to find the last set bit
+//! @return Index of the first set bit, or -1 is no bits are set
+template<typename _Tp>
+__host__ __device__ static inline ssize_t fls(const _Tp & value) noexcept;
+
+}}
+
+#include "impl/bits"
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, bits)
+
+#endif

@@ -1,0 +1,35 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IPC_CUDA_BARRIER
+#define GDAKIS_IPC_CUDA_BARRIER
+
+#include <gdakis/atomic>
+#include <gdakis/ipc/shmem>
+#include <gdakis/spinbar>
+#include <gdakis/umem/cuda>
+
+namespace gdakis::comm::ipc::cuda {
+
+template<thread_scope _Sco>
+class barrier : public ::gdakis::spinbar<_Sco> {
+public:
+    using ptr_type = ptr<gdakis::umem::cuda, barrier>;
+    using ancillary_type = typename ptr_type::ancillary_type;
+
+    template<typename... Args>
+    __host__ __device__ barrier(Args &&...) noexcept;
+
+    template<typename... Args>
+    static ptr_type build(Args &&...) noexcept;
+
+    static ptr_type import(const ancillary_type &) noexcept;
+};
+
+}
+
+#include "impl/barrier"
+
+#endif

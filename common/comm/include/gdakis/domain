@@ -1,0 +1,31 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_COMM_DOMAIN
+#define GDAKIS_COMM_DOMAIN
+
+#include <cstdint>
+#include <gdakis/__comm_cuda_compat>
+
+namespace gdakis::comm {
+
+static const size_t MAX_MSG_SIZE = 1024;
+
+#pragma pack(push, 1)
+
+template<typename _Domain_Info>
+struct domain_info {
+    uint32_t type;
+    union {
+        std::uint8_t __raw[MAX_MSG_SIZE - sizeof(uint32_t)];
+        _Domain_Info domain;
+    };
+};
+
+#pragma pack(pop)
+
+}
+
+#endif

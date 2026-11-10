@@ -1,0 +1,30 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_THREAD
+#define GDAKIS_THREAD
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+
+//! @file /gdakis/thread
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(thread) {
+
+//! @brief Type that represents the current thread
+struct this_thread {
+    //! @brief Sleep for a given amount of nanoseconds
+    //! @param value Number of nanoseconds to sleep for
+    __host__ __device__ static inline void nanosleep(unsigned value) noexcept;
+};
+
+}}
+
+#include "impl/thread"
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, thread)
+
+#endif

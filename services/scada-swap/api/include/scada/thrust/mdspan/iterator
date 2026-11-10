@@ -1,0 +1,68 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_THRUST___MDSPAN_ITERATOR
+#define SCADA_THRUST___MDSPAN_ITERATOR
+
+#if __has_include(<thrust/iterator/iterator_categories.h>)
+
+#  include <scada/__scada_thrust_version>
+
+#  include <scada/cuda/mdspan/iterator>
+#  include <thrust/iterator/iterator_categories.h>
+
+SCADA_THRUST_SIMPLE_NS {
+namespace mdspan {
+SCADA_THRUST_UNIT(iterator) {
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+class iterator;
+
+}}
+
+SCADA_THRUST_UNIT(iterator) {
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+static inline mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> begin(
+    ::cuda::std::mdspan<_Tp, ::cuda::std::extents<_Index, _Extent>, _Layout, _Accessor> &) noexcept;
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+static inline mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> end(
+    ::cuda::std::mdspan<_Tp, ::cuda::std::extents<_Index, _Extent>, _Layout, _Accessor> &) noexcept;
+
+}
+
+namespace mdspan {
+SCADA_THRUST_UNIT(iterator) {
+
+template<typename _Tp, typename _Index, std::size_t _Extent, typename _Layout, typename _Accessor>
+class iterator : public ::scada::cuda::mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor> {
+public:
+    using base_iterator = ::scada::cuda::mdspan::iterator<_Tp, _Index, _Extent, _Layout, _Accessor>;
+    using span_type = typename base_iterator::span_type;
+    using index_type = typename base_iterator::index_type;
+    using iterator_category = ::thrust::random_access_device_iterator_tag;
+
+protected:
+    friend iterator scada::thrust::begin<_Tp, _Index, _Extent, _Layout, _Accessor>(span_type &) noexcept;
+    friend iterator scada::thrust::end<_Tp, _Index, _Extent, _Layout, _Accessor>(span_type &) noexcept;
+
+    __host__ __device__ iterator(span_type &, const index_type &) noexcept;
+
+public:
+    __host__ __device__ iterator(base_iterator && other) noexcept;
+};
+
+}}
+}
+
+#  include "impl/iterator"
+
+#endif
+
+SCADA_THRUST_EXPORT_SIMPLE_NS(scada::thrust::mdspan, iterator)
+SCADA_THRUST_EXPORT_SIMPLE_NS(scada::thrust, iterator)
+
+#endif

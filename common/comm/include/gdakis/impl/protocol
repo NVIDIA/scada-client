@@ -1,0 +1,113 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_COMM_IMPL_PROTOCOL
+#define GDAKIS_COMM_IMPL_PROTOCOL
+
+#include <cerrno>
+#include <string>
+
+namespace gdakis::comm {
+
+inline std::ostream & operator<<(std::ostream & os, const device_type & device) noexcept {
+    switch (device) {
+    case device_type::cpu:
+        return os << "CPU";
+    case device_type::cuda:
+        return os << "CUDA";
+    case device_type::invalid:
+        return os << "INVALID";
+    }
+    return os;
+}
+
+inline std::ostream & operator<<(std::ostream & os, const transport_type & transport) noexcept {
+    switch (transport) {
+    case transport_type::ipc:
+        return os << "IPC";
+    case transport_type::rdma:
+        return os << "RDMA";
+    case transport_type::invalid:
+        return os << "INVALID";
+    }
+    return os;
+}
+
+static inline std::ostream & operator<<(std::ostream & os, const operation & op) noexcept {
+    std::string ss("gdakis::comm::operation::");
+    switch (op) {
+    case operation::invalid:
+        ss += "invalid";
+        break;
+    case operation::register_request_buffers:
+        ss += "register_request_buffers";
+        break;
+    case operation::deregister_request_buffers:
+        ss += "deregister_request_buffers";
+        break;
+    case operation::register_memory_buffer:
+        ss += "register_memory_buffer";
+        break;
+    case operation::deregister_memory_buffer:
+        ss += "deregister_memory_buffer";
+        break;
+    case operation::register_io_buffer_pool:
+        ss += "register_io_buffer_pool";
+        break;
+    case operation::deregister_io_buffer_pool:
+        ss += "deregister_io_buffer_pool";
+        break;
+    default:
+        ss += "unknown";
+        break;
+    }
+    return os << ss;
+}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline constexpr message<_Op, _Backend, _Custom>::message() noexcept
+    : msg_ { header_type(_Op, _Backend::device_type, _Backend::transport_type), {}, {} } {}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline constexpr std::size_t message<_Op, _Backend, _Custom>::size() noexcept {
+    return sizeof(msg_.data_);
+}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline const typename message<_Op, _Backend, _Custom>::data_type &
+message<_Op, _Backend, _Custom>::data() const noexcept {
+    return msg_.data_;
+}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline typename message<_Op, _Backend, _Custom>::data_type & message<_Op, _Backend, _Custom>::data() noexcept {
+    return msg_.data_;
+}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline const typename message<_Op, _Backend, _Custom>::ancillary_type &
+message<_Op, _Backend, _Custom>::ancillary() const noexcept {
+    return ancillary_;
+}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline typename message<_Op, _Backend, _Custom>::ancillary_type &
+message<_Op, _Backend, _Custom>::ancillary() noexcept {
+    return ancillary_;
+}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline const typename message<_Op, _Backend, _Custom>::value_type &
+message<_Op, _Backend, _Custom>::get() const noexcept {
+    return msg_;
+}
+
+template<operation _Op, typename _Backend, typename _Custom>
+inline typename message<_Op, _Backend, _Custom>::value_type & message<_Op, _Backend, _Custom>::get() noexcept {
+    return msg_;
+}
+
+}
+
+#endif

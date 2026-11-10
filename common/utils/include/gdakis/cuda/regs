@@ -1,0 +1,57 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_REGS
+#define GDAKIS_CUDA_REGS
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+
+//! @file gdakis/cuda/regs
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(regs) {
+
+#if defined(__CUDACC__)
+
+//! @brief Macro to generate CUDA functions to access special PTX registers
+//! @param name PTX register name
+#  define __cuda_register_read(name)                                                                                   \
+      __device__ static inline unsigned name() {                                                                       \
+          unsigned ret;                                                                                                \
+          asm volatile("mov.u32 %0, %%" #name ";" : "=r"(ret));                                                        \
+          return ret;                                                                                                  \
+      }
+
+//! @brief PTX `laneid` register
+__cuda_register_read(laneid)
+
+    //! @brief PTX `lanemask_eq` register
+    __cuda_register_read(lanemask_eq)
+
+    //! @brief PTX `lanemask_lt` register
+    __cuda_register_read(lanemask_lt)
+
+    //! @brief PTX `lanemask_gt` register
+    __cuda_register_read(lanemask_gt)
+
+    //! @brief PTX `lanemask_le` register
+    __cuda_register_read(lanemask_le)
+
+    //! @brief PTX `lanemask_ge` register
+    __cuda_register_read(lanemask_ge)
+
+    //! @brief PTX `smid` register
+    __cuda_register_read(smid)
+
+#endif
+
+}}
+
+namespace gdakis::cuda {
+using namespace ::gdakis::utils::cuda::___regs;
+}
+
+#endif

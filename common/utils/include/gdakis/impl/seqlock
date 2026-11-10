@@ -1,0 +1,448 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IMPL_SEQLOCK
+#define GDAKIS_IMPL_SEQLOCK
+
+#if defined(__CUDACC__)
+#  include <cooperative_groups.h>
+#endif
+
+#include <gdakis/thread>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(seqlock) {
+
+namespace detail {
+
+template<typename _Fn, size_t... Is>
+__host__ __device__ static inline constexpr auto __index_apply_impl(_Fn f, std::index_sequence<Is...>) noexcept {
+    return f(std::integral_constant<size_t, Is> {}...);
+}
+
+template<size_t N, typename _Fn>
+__host__ __device__ static inline constexpr auto __index_apply(_Fn f) noexcept {
+    return __index_apply_impl(f, std::make_index_sequence<N> {});
+}
+
+template<typename Tuple, typename _Fn>
+__host__ __device__ static inline constexpr auto __apply(Tuple t, _Fn f) noexcept {
+    return __index_apply<std::tuple_size<Tuple> {}>([&](auto... Is) { return f(std::get<Is>(t)...); });
+}
+
+}
+
+template<thread_scope _Sco>
+inline __host__ __device__ seqlock<_Sco>::seqlock() noexcept
+    : current_(0),
+      ticket_(0)
+#if !defined(NDEBUG)
+      ,
+      thread_id_(static_cast<unsigned>(-1)),
+      block_id_(static_cast<unsigned>(-1))
+#endif
+{
+}
+
+template<thread_scope _Sco>
+inline __host__ __device__ void seqlock<_Sco>::init() noexcept {
+    current_.store(0);
+    ticket_.store(0);
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+inline
+    __host__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    seqlock<_Sco>::__host_read_critical_section(_Fn && fn, Args &&... args) noexcept {
+    unsigned before, after;
+    std::invoke_result_t<_Fn, Args...> ret;
+
+    do {
+        before = read_lock();
+        ret = fn(std::forward<Args>(args)...);
+        after = read_unlock();
+    } while (before != after);
+
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+inline __host__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>
+seqlock<_Sco>::__host_read_critical_section(_Fn && fn, Args &&... args) noexcept {
+    unsigned before, after;
+
+    do {
+        before = read_lock();
+        fn(std::forward<Args>(args)...);
+        after = read_unlock();
+    } while (before != after);
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+__host__ __device__ inline std::invoke_result_t<_Fn, Args...> seqlock<_Sco>::read_critical_section(
+    _Fn && fn, Args &&... args) noexcept {
+#if defined(__CUDA_ARCH__)
+    return __device_read_critical_section(
+        cooperative_groups::coalesced_threads(), std::forward<_Fn>(fn), std::forward<Args>(args)...);
+#else
+    return __host_read_critical_section(std::forward<_Fn>(fn), std::forward<Args>(args)...);
+#endif
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline unsigned seqlock<_Sco>::read_lock() const noexcept {
+    unsigned ticket = current_.load(memory_order_acquire);
+
+    return ticket & ~0x1;
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline unsigned seqlock<_Sco>::read_unlock() const noexcept {
+    atomic_thread_fence(memory_order_acq_rel, _Sco);
+    return current_.load(memory_order_relaxed);
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+inline
+    __host__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    seqlock<_Sco>::__host_write_critical_section(_Fn && fn, Args &&... args) noexcept {
+    write_lock();
+    auto ret = fn(std::forward<Args>(args)...);
+    write_unlock();
+
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+inline __host__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>
+seqlock<_Sco>::__host_write_critical_section(_Fn && fn, Args &&... args) noexcept {
+    write_lock();
+    fn(std::forward<Args>(args)...);
+    write_unlock();
+}
+
+template<thread_scope _Sco>
+template<typename _Fn, typename... Args>
+__host__ __device__ inline std::invoke_result_t<_Fn, Args...> seqlock<_Sco>::write_critical_section(
+    _Fn && fn, Args &&... args) noexcept {
+#if defined(__CUDA_ARCH__)
+    return __device_write_critical_section(
+        cooperative_groups::coalesced_threads(), std::forward<_Fn>(fn), std::forward<Args>(args)...);
+#else
+    return __host_write_critical_section(std::forward<_Fn>(fn), std::forward<Args>(args)...);
+#endif
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline void seqlock<_Sco>::busy_wait(unsigned ticket) noexcept {
+    unsigned current = current_.load(memory_order_acquire);
+    while (current != ticket) {
+        // This is what empirically seems to maximize the throughput of the radix-tree
+        unsigned delay = (ticket - current) >> 1;
+        this_thread::nanosleep(delay);
+        current = current_.load(memory_order_acquire);
+    }
+    current_.fetch_add(1, memory_order_release);
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline void seqlock<_Sco>::write_lock() noexcept {
+    busy_wait(ticket_.fetch_add(2));
+#if !defined(NDEBUG) && defined(__CUDA_ARCH__)
+    thread_id_.store(threadIdx.x, memory_order_relaxed);
+    block_id_.store(blockIdx.x, memory_order_release);
+#endif
+}
+
+template<thread_scope _Sco>
+__host__ __device__ inline void seqlock<_Sco>::write_unlock() noexcept {
+#if !defined(NDEBUG)
+    unsigned current =
+#endif
+        current_.fetch_add(1, memory_order_release);
+    assert(ticket_.load(memory_order_acquire) > current);
+}
+
+#if defined(__CUDACC__)
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    seqlock<_Sco>::__device_read_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    unsigned before, after;
+    std::invoke_result_t<_Fn, Args...> ret;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    do {
+        before = read_lock();
+        ret = fn(std::forward<Args>(args)...);
+        after = read_unlock();
+    } while (before != after);
+    g.sync();
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>
+seqlock<_Sco>::__device_read_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    unsigned before, after;
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    do {
+        before = read_lock();
+        fn(std::forward<Args>(args)...);
+        after = read_unlock();
+    } while (before != after);
+    g.sync();
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    seqlock<_Sco>::__device_read_parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    return __device_read_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>
+seqlock<_Sco>::__device_read_parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    __device_read_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    seqlock<_Sco>::__device_read_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    std::invoke_result_t<_Fn, Args...> ret;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    ret = cooperative_groups::invoke_one_broadcast(g, [this, fn, tuple = std::make_tuple(std::forward<Args>(args)...)] {
+        unsigned before, after;
+        std::invoke_result_t<_Fn, Args...> ret;
+        do {
+            before = read_lock();
+            ret = detail::__apply(tuple, fn);
+            after = read_unlock();
+        } while (before != after);
+
+        return ret;
+    });
+    g.sync();
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>
+seqlock<_Sco>::__device_read_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    cooperative_groups::invoke_one(g, [this, fn, tuple = std::make_tuple(std::forward<Args>(args)...)] {
+        unsigned before, after;
+        do {
+            before = read_lock();
+            detail::__apply(tuple, fn);
+            after = read_unlock();
+        } while (before != after);
+    });
+    g.sync();
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline std::invoke_result_t<_Fn, Args...> seqlock<_Sco>::read_critical_section(
+    const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    return __device_read_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline std::invoke_result_t<_Fn, Args...> seqlock<_Sco>::read_parallel_critical_section(
+    const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    return __device_read_parallel_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline std::invoke_result_t<_Fn, Args...> seqlock<_Sco>::read_single_thread_critical_section(
+    const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    return __device_read_single_thread_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg>
+__device__ inline unsigned seqlock<_Sco>::read_lock(const _Cg & g) const noexcept {
+    return read_lock();
+}
+
+template<thread_scope _Sco>
+template<typename _Cg>
+__device__ inline unsigned seqlock<_Sco>::read_parallel_lock(const _Cg & g) const noexcept {
+    return read_lock();
+}
+
+template<thread_scope _Sco>
+template<typename _Cg>
+__device__ inline unsigned seqlock<_Sco>::read_unlock(const _Cg & g) const noexcept {
+    return read_unlock();
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    seqlock<_Sco>::__device_write_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    std::invoke_result_t<_Fn, Args...> ret;
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    unsigned id = g.thread_rank();
+
+    cooperative_groups::invoke_one(g, [this] { write_lock(); });
+
+    for (unsigned n = 0; n < g.num_threads(); ++n) {
+        if (n == id)
+            ret = fn(std::forward<Args>(args)...);
+        g.sync();
+    }
+
+    cooperative_groups::invoke_one(g, [this] { write_unlock(); });
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>
+seqlock<_Sco>::__device_write_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+    unsigned id = g.thread_rank();
+
+    cooperative_groups::invoke_one(g, [this] { write_lock(); });
+    for (unsigned n = 0; n < g.num_threads(); ++n) {
+        if (n == id)
+            fn(std::forward<Args>(args)...);
+        g.sync();
+    }
+    cooperative_groups::invoke_one(g, [this] { write_unlock(); });
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    seqlock<_Sco>::__device_write_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    std::invoke_result_t<_Fn, Args...> ret;
+
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+
+    ret = cooperative_groups::invoke_one_broadcast(g, [this, fn, tuple = std::make_tuple(std::forward<Args>(args)...)] {
+        std::invoke_result_t<_Fn, Args...> ret;
+
+        write_lock();
+        ret = detail::__apply(tuple, fn);
+        write_unlock();
+
+        return ret;
+    });
+    return ret;
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+inline __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>
+seqlock<_Sco>::__device_write_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+#  if !defined(NDEBUG)
+    {
+        int pred;
+        assert(g.match_all(reinterpret_cast<uintptr_t>(this), pred) != 0);
+    }
+#  endif
+    cooperative_groups::invoke_one(g, [this, fn, tuple = std::make_tuple(std::forward<Args>(args)...)] {
+        write_lock();
+        detail::__apply(tuple, fn);
+        write_unlock();
+    });
+}
+
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline std::invoke_result_t<_Fn, Args...> seqlock<_Sco>::write_critical_section(
+    const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    return __device_write_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+template<thread_scope _Sco>
+template<typename _Cg, typename _Fn, typename... Args>
+__device__ inline std::invoke_result_t<_Fn, Args...> seqlock<_Sco>::write_single_thread_critical_section(
+    const _Cg & g, _Fn && fn, Args &&... args) noexcept {
+    return __device_write_single_thread_critical_section(g, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+template<thread_scope _Sco>
+template<typename _Cg>
+__device__ inline void seqlock<_Sco>::write_lock(const _Cg & g) noexcept {
+    unsigned id, ticket;
+
+    id = g.thread_rank();
+    ticket
+        = cooperative_groups::invoke_one_broadcast(g, [this, &g] { return ticket_.fetch_add(g.num_threads() << 1); });
+    ticket += (id << 1);
+    busy_wait(ticket);
+#  if !defined(NDEBUG)
+    thread_id_.store(threadIdx.x, memory_order_relaxed);
+    block_id_.store(blockIdx.x, memory_order_release);
+#  endif
+}
+
+#endif // __CUDACC__
+
+}}
+
+#endif

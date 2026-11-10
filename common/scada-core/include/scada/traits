@@ -1,0 +1,36 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_TRAITS
+#define SCADA_TRAITS
+
+#include <scada/__core_version>
+#include <scada/io>
+#include <scada/types>
+
+#include <gdakis/ipc/autobatch>
+#include <gdakis/ipc/io_buffer_pool>
+
+SCADA_CORE_SIMPLE_NS {
+SCADA_CORE_UNIT(traits) {
+
+template<io::socket::domain>
+struct store_traits;
+
+template<>
+struct store_traits<io::socket::domain::local> {
+
+    template<typename _Allocator, typename _Wqe, gdakis::thread_scope _Sco, std::size_t _NumBuffers>
+    using autobatch_type = gdakis::comm::ipc::autobatch<_Allocator, _Wqe, _Sco, _NumBuffers>;
+
+    template<typename _Data, typename _Status>
+    using io_buffer_pool_type = gdakis::comm::ipc::io_buffer_pool<_Data, _Status>;
+};
+
+}}
+
+SCADA_CORE_EXPORT_SIMPLE_NS(scada, traits)
+
+#endif

@@ -1,0 +1,156 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_UMEM_IMPL_MEM
+#define GDAKIS_UMEM_IMPL_MEM
+
+#include <gdakis/__umem_cuda_compat>
+
+namespace gdakis::umem {
+
+namespace detail {
+
+template<typename _Tp>
+struct notifier {
+    template<typename _Fn>
+    static inline void notify(_Fn && fn, _Tp * ptr) {
+        fn(ptr);
+    }
+
+    static inline void notify(std::nullptr_t, _Tp *) {}
+};
+
+}
+
+template<typename _Type, typename _Tp>
+template<typename _Fn, typename... Args>
+inline typename mem<_Type, _Tp>::ptr_type mem<_Type, _Tp>::__alloc_notify(
+    _Fn && notify, __ptr_type && p, Args &&... args) {
+    if (p == nullptr)
+        return nullptr;
+    bool ret = _Type::template call_constructor<_Tp>(p.get(), std::forward<Args>(args)...);
+    if (ret == false)
+        return nullptr;
+
+    auto del = p.get_deleter();
+    return ptr_type(reinterpret_cast<_Tp *>(p.release()), [del = std::move(del), fn = std::move(notify)](_Tp * p) {
+        _Type::template call_destructor<_Tp>(p);
+        detail::notifier<_Tp>::notify(std::move(fn), p);
+        del(reinterpret_cast<void *>(p));
+    });
+}
+
+template<typename _Type, typename _Tp>
+template<typename... Args>
+inline typename mem<_Type, _Tp>::ptr_type mem<_Type, _Tp>::alloc(Args &&... args) {
+    return __alloc_notify(nullptr, _Type::alloc(sizeof(_Tp)), std::forward<Args>(args)...);
+}
+
+template<typename _Type, typename _Tp>
+template<typename _Fn, typename... Args>
+inline typename mem<_Type, _Tp>::ptr_type mem<_Type, _Tp>::alloc_notify(_Fn && fn, Args &&... args) {
+    return __alloc_notify(std::forward<_Fn>(fn), _Type::alloc(sizeof(_Tp)), std::forward<Args>(args)...);
+}
+
+template<typename _Type, typename _Tp>
+template<typename... Args>
+inline typename mem<_Type, _Tp>::ptr_type mem<_Type, _Tp>::alloc_system(Args &&... args) {
+    return __alloc_notify(nullptr, _Type::alloc_system(sizeof(_Tp)), std::forward<Args>(args)...);
+}
+
+/** Array allocations */
+
+template<typename _Type, typename _Tp>
+template<typename _Fn>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::__alloc(
+    __ptr_type && p, std::size_t n_elems, _Fn && fn) {
+    if (p == nullptr)
+        return nullptr;
+    bool ret = _Type::call_map(reinterpret_cast<_Tp *>(p.get()), n_elems, std::forward<_Fn>(fn));
+    if (ret == false)
+        return nullptr;
+
+    auto del = p.get_deleter();
+    return ptr_type(
+        reinterpret_cast<_Tp *>(p.release()), [del = std::move(del)](_Tp * p) { del(reinterpret_cast<void *>(p)); });
+}
+
+template<typename _Type, typename _Tp>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::__alloc(
+    __ptr_type && p, std::size_t n_elems, std::nullptr_t) {
+    if (p == nullptr)
+        return nullptr;
+    auto del = p.get_deleter();
+    return ptr_type(
+        reinterpret_cast<_Tp *>(p.release()), [del = std::move(del)](_Tp * p) { del(reinterpret_cast<void *>(p)); });
+}
+
+template<typename _Type, typename _Tp>
+template<typename _Fn>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::alloc(std::size_t n_elems, _Fn && fn) {
+    return __alloc(_Type::alloc(n_elems * sizeof(_Tp)), n_elems, std::forward<_Fn>(fn));
+}
+
+template<typename _Type, typename _Tp>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::alloc(std::size_t n_elems) {
+    return alloc(n_elems, nullptr);
+}
+
+template<typename _Type, typename _Tp>
+template<typename _Fn>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::alloc_system(std::size_t n_elems, _Fn && fn) {
+    return __alloc(_Type::alloc_system(n_elems * sizeof(_Tp)), n_elems, std::forward<_Fn>(fn));
+}
+
+template<typename _Type, typename _Tp>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::alloc_system(std::size_t n_elems) {
+    return alloc_system(n_elems, [] __host__ __device__(std::size_t, _Tp *) {});
+}
+
+template<typename _Type, typename _Tp>
+inline std::size_t mem<_Type, _Tp[]>::alloc_pages_size(std::size_t n_elems) {
+    std::size_t n_pages = ((n_elems * sizeof(_Tp)) + _Type::get_page_size() - 1) / _Type::get_page_size();
+    return n_pages * _Type::get_page_size();
+}
+
+template<typename _Type, typename _Tp>
+template<typename _Fn, typename>
+inline typename mem<_Type, _Tp[]>::dma_buffer_type mem<_Type, _Tp[]>::alloc_dma_buffer(std::size_t n_elems, _Fn && fn) {
+    auto ret = _Type::template alloc_dma_buffer<_Tp>(n_elems * sizeof(_Tp));
+    if (ret.retval() != 0)
+        return ret;
+    auto err = _Type::call_map(ret.get(), n_elems, std::forward<_Fn>(fn));
+    return err ? std::move(ret) : dma_buffer_type(-EINVAL);
+}
+
+template<typename _Type, typename _Tp>
+inline typename mem<_Type, _Tp[]>::dma_buffer_type mem<_Type, _Tp[]>::alloc_dma_buffer(std::size_t n_elems) {
+    return alloc_dma_buffer(n_elems, [] __host__ __device__(std::size_t, _Tp *) {});
+}
+
+template<typename _Type, typename _Tp>
+template<typename _Fn>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::alloc_pages_shared(std::size_t n_elems, _Fn && fn) {
+    return __alloc(_Type::alloc_pages_shared(n_elems * sizeof(_Tp)), n_elems, std::forward<_Fn>(fn));
+}
+
+template<typename _Type, typename _Tp>
+inline typename mem<_Type, _Tp[]>::ptr_type mem<_Type, _Tp[]>::alloc_pages_shared(std::size_t n_elems) {
+    return alloc_pages_shared(n_elems, [] __host__ __device__(std::size_t, _Tp *) {});
+}
+
+template<typename _Type, typename _Tp>
+inline void memset(const umem::ptr_type<_Tp> & ptr, int c, std::size_t size) {
+    _Type::memset(reinterpret_cast<void *>(ptr.get()), c, size);
+}
+
+template<typename _Type, typename _Tp>
+inline void memcpy(const umem::ptr_type<_Tp> & dst, const _Tp * src, std::size_t size) {
+    _Type::memcpy(reinterpret_cast<void *>(dst.get()), reinterpret_cast<const void *>(src), size);
+}
+
+}
+
+#endif

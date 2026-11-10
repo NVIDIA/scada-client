@@ -1,0 +1,434 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_IMPL_WARP
+#define GDAKIS_CUDA_IMPL_WARP
+
+#include <gdakis/bits>
+#include <gdakis/cuda/asm>
+#include <gdakis/cuda/regs>
+#include <gdakis/cuda/thread>
+
+#if defined(__CUDACC__)
+#  if __CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ == 3
+#    define GDAKIS_SW4166479
+#  endif
+#endif
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(warp) {
+
+#if defined(__CUDACC__)
+
+__device__ inline void this_warp::sync(unsigned mask) noexcept {
+    __syncwarp(mask);
+}
+
+__device__ inline unsigned this_warp::leader(unsigned mask) noexcept {
+    return ffs(mask) - 1;
+}
+
+namespace detail {
+template<typename _Fn, typename... Args>
+__device__ static inline typename std::enable_if<std::is_void_v<std::invoke_result_t<_Fn, Args...>>>::type
+__single_thread(const unsigned & active_mask, _Fn && fn, Args &&... args) {
+    if (active_mask == lanemask_eq()) {
+        fn(std::forward<Args>(args)...);
+    } else {
+        if (this_thread::is_leader(active_mask))
+            fn(std::forward<Args>(args)...);
+        this_warp::sync(active_mask);
+    }
+}
+
+template<typename _Fn, typename... Args>
+__device__ static inline typename std::enable_if<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>,
+    std::invoke_result_t<_Fn, Args...>>::type
+__single_thread(const unsigned & active_mask, _Fn && fn, Args &&... args) {
+    if (active_mask == lanemask_eq()) {
+        return fn(std::forward<Args>(args)...);
+    } else {
+        using return_type = std::invoke_result_t<_Fn, Args...>;
+        unsigned char buffer[sizeof(return_type)];
+        return_type * ret = reinterpret_cast<return_type *>(buffer);
+
+        if (this_thread::is_leader(active_mask)) {
+            return_type tmp(fn(std::forward<Args>(args)...));
+            memcpy(ret, &tmp, sizeof(tmp));
+        }
+        return this_warp::shuffle(active_mask, *ret, this_warp::leader(active_mask));
+    }
+}
+
+}
+
+template<typename _Fn, typename... Args>
+__device__ inline std::invoke_result_t<_Fn, Args...> this_warp::single_thread(
+    unsigned mask, _Fn && fn, Args &&... args) noexcept {
+    return detail::__single_thread(mask, std::forward<_Fn>(fn), std::forward<Args>(args)...);
+}
+
+namespace detail {
+
+template<typename _Tp>
+__device__ static inline typename std::enable_if<sizeof(_Tp) == 4, _Tp>::type __shuffle(
+    unsigned active_mask, const _Tp & value, int leader) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned ret;
+    asm(".pragma \"sw4166479\"; shfl.sync.idx.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(ret)
+        : "r"(*reinterpret_cast<const unsigned *>(&value)), "r"(leader), "r"(active_mask));
+#  else
+    unsigned ret = __shfl_sync(active_mask, *(reinterpret_cast<const unsigned *>(&value)), leader);
+#  endif
+    return *(reinterpret_cast<_Tp *>(&ret));
+}
+
+template<typename _Tp>
+__device__ static inline typename std::enable_if<sizeof(_Tp) == 8, _Tp>::type __shuffle(
+    unsigned active_mask, const _Tp & value, int leader) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned high, low;
+    asm(".pragma \"sw4166479\"; shfl.sync.idx.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(low)
+        : "r"(*reinterpret_cast<const unsigned *>(&value)), "r"(leader), "r"(active_mask));
+    asm(".pragma \"sw4166479\"; shfl.sync.idx.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(high)
+        : "r"(*(reinterpret_cast<const unsigned *>(&value) + 1)), "r"(leader), "r"(active_mask));
+    unsigned long long ret = high;
+    ret = (ret << 32) | low;
+#  else
+
+    unsigned long long ret = __shfl_sync(active_mask, *(reinterpret_cast<const unsigned long long *>(&value)), leader);
+#  endif
+    return *(reinterpret_cast<_Tp *>(&ret));
+}
+
+template<size_t N>
+__device__ static inline void __shuffle_copy(
+    unsigned active_mask, unsigned long * dst, const unsigned long * src, int leader) noexcept {
+    *dst = __shuffle(active_mask, *src, leader);
+    __shuffle_copy<N - 4>(active_mask, ++dst, ++src, leader);
+}
+
+template<>
+__device__ inline void __shuffle_copy<4>(
+    unsigned active_mask, unsigned long * dst, const unsigned long * src, int leader) noexcept {
+    *dst = __shuffle(active_mask, *src, leader);
+}
+
+template<>
+__device__ inline void __shuffle_copy<3>(
+    unsigned active_mask, unsigned long * dst, const unsigned long * src, int leader) noexcept {
+    unsigned ret = __shuffle(active_mask, *src, leader);
+    ::memcpy(&dst, &ret, 3);
+}
+
+template<>
+__device__ inline void __shuffle_copy<2>(
+    unsigned active_mask, unsigned long * dst, const unsigned long * src, int leader) noexcept {
+    unsigned ret = __shuffle(active_mask, *src, leader);
+    ::memcpy(&dst, &ret, 2);
+}
+
+template<>
+__device__ inline void __shuffle_copy<1>(
+    unsigned active_mask, unsigned long * dst, const unsigned long * src, int leader) noexcept {
+    unsigned ret = __shuffle(active_mask, *src, leader);
+    ::memcpy(&dst, &ret, 1);
+}
+
+template<typename T>
+__device__ static inline typename std::enable_if<(sizeof(T) > 8), T>::type __shuffle(
+    unsigned active_mask, const T & value, int leader) noexcept {
+    unsigned char buffer[sizeof(T)];
+    T * ret = reinterpret_cast<T *>(buffer);
+    __shuffle_copy<sizeof(T)>(active_mask, reinterpret_cast<unsigned long *>(buffer),
+        reinterpret_cast<const unsigned long *>(&value), leader);
+    return std::move(*ret);
+}
+
+__device__ static inline bool __shuffle(unsigned active_mask, bool value, int leader) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned mask;
+    unsigned __value = value ? 1 : 0;
+    asm("{.reg .pred %%p; setp.eq.b32 %%p, %1, 1; .pragma \"sw4166479\"; vote.sync.ballot.b32 %0, %%p, %2; }"
+        : "=r"(mask)
+        : "r"(__value), "r"(active_mask));
+#  else
+    unsigned mask = __ballot_sync(active_mask, value);
+#  endif
+    return mask & (1UL << leader);
+}
+
+}
+
+template<typename _Tp>
+__device__ inline _Tp this_warp::shuffle(unsigned mask, const _Tp & value, int id) noexcept {
+    return detail::__shuffle(mask, value, id);
+}
+
+namespace detail {
+
+template<typename T>
+__device__ static inline typename std::enable_if<sizeof(T) == 4, T>::type __shuffle_xor(
+    unsigned active_mask, T value, int leader) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned ret;
+    asm(".pragma \"sw4166479\"; shfl.sync.bfly.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(ret)
+        : "r"(*reinterpret_cast<const unsigned *>(&value)), "r"(leader), "r"(active_mask));
+#  else
+    unsigned ret = __shfl_xor_sync(active_mask, *(reinterpret_cast<unsigned *>(&value)), leader);
+#  endif
+    return *(reinterpret_cast<T *>(&ret));
+}
+
+template<typename T>
+__device__ static inline typename std::enable_if<sizeof(T) == 8, T>::type __shuffle_xor(
+    unsigned active_mask, T value, int leader) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned high, low;
+    asm(".pragma \"sw4166479\"; shfl.sync.bfly.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(low)
+        : "r"(*reinterpret_cast<const unsigned *>(&value)), "r"(leader), "r"(active_mask));
+    asm(".pragma \"sw4166479\"; shfl.sync.bfly.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(high)
+        : "r"(*(reinterpret_cast<const unsigned *>(&value) + 1)), "r"(leader), "r"(active_mask));
+    unsigned long long ret = high;
+    ret = (ret << 32) | low;
+#  else
+    unsigned long long ret = __shfl_xor_sync(active_mask, *(reinterpret_cast<unsigned long long *>(&value)), leader);
+#  endif
+    return *(reinterpret_cast<T *>(&ret));
+}
+
+}
+
+template<typename _Tp>
+__device__ inline _Tp this_warp::shuffle_xor(unsigned mask, const _Tp & value, int id) noexcept {
+    return detail::__shuffle_xor(mask, value, id);
+}
+
+namespace detail {
+
+template<typename T>
+__device__ static inline typename std::enable_if<sizeof(T) == 4, T>::type __shuffle_up(
+    unsigned active_mask, T value, int leader) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned ret;
+    asm(".pragma \"sw4166479\"; shfl.sync.up.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(ret)
+        : "r"(*reinterpret_cast<const unsigned *>(&value)), "r"(leader), "r"(active_mask));
+#  else
+    unsigned ret = __shfl_up_sync(active_mask, *(reinterpret_cast<unsigned *>(&value)), leader);
+#  endif
+    return *(reinterpret_cast<T *>(&ret));
+}
+
+template<typename T>
+__device__ static inline typename std::enable_if<sizeof(T) == 8, T>::type __shuffle_up(
+    unsigned active_mask, T value, int leader) {
+#  if defined(GDAKIS_SW4166479)
+    unsigned high, low;
+    asm(".pragma \"sw4166479\"; shfl.sync.up.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(low)
+        : "r"(*reinterpret_cast<const unsigned *>(&value)), "r"(leader), "r"(active_mask));
+    asm(".pragma \"sw4166479\"; shfl.sync.up.b32 %0, %1, %2, 0x1f, %3;"
+        : "=r"(high)
+        : "r"(*(reinterpret_cast<const unsigned *>(&value) + 1)), "r"(leader), "r"(active_mask));
+    unsigned long long ret = high;
+    ret = (ret << 32) | low;
+#  else
+    unsigned long long ret = __shfl_up_sync(active_mask, *(reinterpret_cast<unsigned long long *>(&value)), leader);
+#  endif
+    return *(reinterpret_cast<T *>(&ret));
+}
+
+}
+
+template<typename _Tp>
+__device__ inline _Tp this_warp::shuffle_up(unsigned mask, const _Tp & value, int id) noexcept {
+    return detail::__shuffle_up(mask, value, id);
+}
+
+namespace detail {
+
+template<typename _Tp>
+__device__ static inline std::enable_if_t<sizeof(_Tp) == 4, unsigned> __match(
+    unsigned active_mask, const _Tp & value) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned ret;
+    asm(".pragma \"sw4166479\"; match.any.sync.b32 %0, %1, %2;"
+        : "=r"(ret)
+        : "r"(*reinterpret_cast<const unsigned *>(&value)), "r"(active_mask));
+#  else
+    unsigned ret = __match_any_sync(active_mask, *(reinterpret_cast<const unsigned *>(&value)));
+#  endif
+    return ret;
+}
+
+template<typename _Tp>
+__device__ static inline std::enable_if_t<sizeof(_Tp) == 8, unsigned> __match(
+    unsigned active_mask, const _Tp & value) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned ret;
+    asm(".pragma \"sw4166479\"; match.any.sync.b64 %0, %1, %2;"
+        : "=r"(ret)
+        : "l"(*reinterpret_cast<const unsigned long long *>(&value)), "r"(active_mask));
+#  else
+    unsigned ret = __match_any_sync(active_mask, *(reinterpret_cast<const unsigned *>(&value)));
+#  endif
+    return ret;
+}
+
+}
+
+template<typename _Tp>
+__device__ inline unsigned this_warp::match(unsigned mask, const _Tp & value) noexcept {
+    return detail::__match(mask, value);
+}
+
+__device__ inline unsigned this_warp::ballot(unsigned active_mask, bool value) noexcept {
+#  if defined(GDAKIS_SW4166479)
+    unsigned mask;
+    unsigned __value = value ? 1 : 0;
+    asm("{.reg .pred %%p; setp.eq.b32 %%p, %1, 1; .pragma \"sw4166479\"; vote.sync.ballot.b32 %0, %%p, %2; }"
+        : "=r"(mask)
+        : "r"(__value), "r"(active_mask));
+#  else
+    unsigned mask = __ballot_sync(active_mask, value);
+#  endif
+    return mask;
+}
+
+namespace detail {
+
+template<typename T, T(Op)(const T &, const T &)>
+__device__ static inline T __reduce_full_warp(const T & value) noexcept {
+    T ret = value;
+    for (int i = this_warp::size >> 1; i > 0; i >>= 1) {
+        T tmp = this_warp::shuffle_xor(-1U, ret, i);
+        ret = Op(tmp, ret);
+    }
+    return ret;
+}
+
+template<typename T, T(Op)(const T &, const T &)>
+__device__ static inline T __reduce_partial_warp(unsigned active_mask, const T & value) noexcept {
+    unsigned loop_mask = active_mask;
+    unsigned id = popc(active_mask & lanemask_lt());
+    unsigned n = 1;
+    T ret = value;
+
+    while (popc(loop_mask) > 1) {
+        T tmp;
+        int peer;
+
+        if (id & n) {
+            int pivot = bfind(loop_mask & lanemask_le());
+            peer = bfind(loop_mask & ((1 << pivot) - 1));
+        } else {
+            peer = ffs(loop_mask & lanemask_gt()) - 1;
+        }
+        peer = peer >= 0 ? peer : laneid();
+
+        tmp = __shuffle(active_mask, ret, peer);
+        if (peer != laneid())
+            ret = Op(ret, tmp);
+        loop_mask = loop_mask & __ballot_sync(active_mask, (id & n) == 0);
+        n <<= 1;
+    }
+    ret = __shuffle(active_mask, ret, ffs(active_mask) - 1);
+    return ret;
+}
+
+}
+
+template<typename _Tp, _Tp(Op)(const _Tp &, const _Tp &)>
+__device__ inline _Tp this_warp::reduce(unsigned active_mask, const _Tp & value) noexcept {
+    if (active_mask == -1U)
+        return detail::__reduce_full_warp<_Tp, Op>(value);
+    return detail::__reduce_partial_warp<_Tp, Op>(active_mask, value);
+}
+
+namespace detail {
+
+template<typename T, T(Op)(const T &, const T &)>
+__device__ static inline T __scan_full_warp(const T & value) {
+    T ret = value;
+    for (int i = 1; i <= warpSize; i >>= 1) {
+        T tmp = __shuffle_up(-1U, ret, i);
+        if (laneid() >= i)
+            ret = Op(tmp, ret);
+    }
+    return ret;
+}
+
+template<typename T, T(Op)(const T &, const T &)>
+__device__ static inline T __scan_partial_warp(unsigned active_mask, const T & value) {
+    unsigned loop_mask = active_mask;
+    unsigned id = popc(active_mask & lanemask_lt());
+    unsigned total = popc(active_mask);
+    unsigned n = 1;
+    T ret = value;
+
+    while (popc(loop_mask) > 1) {
+        T tmp;
+        int peer;
+
+        peer = ffs(active_mask & lanemask_gt()) - 1;
+        peer = peer > 0 ? peer : laneid();
+        tmp = __shuffle(active_mask, value, peer);
+
+        if (total - id > n)
+            ret = Op(ret, tmp);
+
+        unsigned step_mask = __ballot_sync(loop_mask, (id & n) == 0);
+        loop_mask = (id & n) == 0 ? loop_mask & step_mask : loop_mask & ~step_mask;
+        n <<= 1;
+    }
+    return ret;
+}
+
+}
+
+template<typename _Tp, _Tp(Op)(const _Tp &, const _Tp &)>
+__device__ static inline _Tp scan(unsigned active_mask, const _Tp & value) {
+    if (active_mask == -1U)
+        return detail::__scan_full_warp<_Tp, Op>(value);
+    return detail::__scan_partial_warp<_Tp, Op>(active_mask, value);
+}
+
+template<typename T>
+__device__ inline T op::max(const T & a, const T & b) noexcept {
+    return a >= b ? a : b;
+}
+
+template<typename T>
+__device__ inline T op::min(const T & a, const T & b) noexcept {
+    return a < b ? a : b;
+}
+
+template<typename T>
+__device__ inline T op::add(const T & a, const T & b) noexcept {
+    return a + b;
+}
+
+template<typename T>
+__device__ inline T op::or_(const T & a, const T & b) noexcept {
+    return a | b;
+}
+
+template<typename T>
+__device__ inline T op::and_(const T & a, const T & b) noexcept {
+    return a & b;
+}
+
+#endif /* __CUDACC__ */
+
+}}
+
+#endif

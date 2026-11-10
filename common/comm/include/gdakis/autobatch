@@ -1,0 +1,78 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_AUTOBATCH
+#define GDAKIS_AUTOBATCH
+#include "impl/buffer"
+#include <gdakis/__comm_cuda_compat>
+
+namespace gdakis::comm {
+
+template<typename _Tp, thread_scope _Sco = thread_scope_device, size_t _NumBuffers = 2>
+class autobatch {
+private:
+    static constexpr unsigned array_size = _NumBuffers;
+    using buffer_type = buffer<_Tp, _Sco>;
+    using array_type = std::array<buffer_type, _NumBuffers>;
+
+    array_type buffers_;
+    unsigned current_buffer_;
+
+    // Helper struct to hold entry information
+    struct entry_token {
+        unsigned position;
+        unsigned buffer_idx;
+        unsigned epoch;
+    };
+
+    // Helper function to build array of buffers
+    template<typename _Fn, std::size_t... _I>
+    static inline __host__ __device__ array_type __build_array(_Fn && fn, std::index_sequence<_I...>) noexcept;
+
+public:
+    inline __host__ __device__ static constexpr unsigned number_of_buffers() noexcept;
+
+    template<typename _Fn>
+    inline __host__ __device__ autobatch(_Fn && fn) noexcept;
+
+    // Get the next buffer to try
+    __host__ __device__ inline unsigned next_buffer_index(unsigned current) const noexcept;
+
+    // Enter a buffer (always succeeds)
+    __host__ __device__ inline entry_token enter() noexcept;
+
+    // Exit a buffer
+    __host__ __device__ inline void exit(const entry_token & token) noexcept;
+
+    // Push data to the buffer
+    template<typename _Arg>
+    __host__ __device__ inline void push(_Arg && arg) noexcept;
+
+#if defined(__CUDACC__)
+    //! @brief GPU-only function to submit a work request for each thread in the input thread group
+    //! @tparam _Arg Type of the functor that sets the work request values
+    //! @param group Thread group of threads pushing work requests
+    //! @param arg parameter to be set for each thread
+    template<typename _Cg, typename _Arg>
+    __device__ inline void push(const _Cg & group, _Arg && arg) noexcept;
+
+    // Enter a buffer (always succeeds)
+    template<typename _Cg>
+    __device__ inline entry_token enter_group(const _Cg & group) noexcept;
+
+    // Exit a buffer
+    template<typename _Cg>
+    __device__ inline void exit_group(const _Cg & group, const entry_token & token) noexcept;
+#endif
+
+    template<typename Arg>
+    __host__ __device__ inline void set(const entry_token & token, Arg && arg) noexcept;
+};
+
+}
+
+#include "impl/autobatch"
+
+#endif

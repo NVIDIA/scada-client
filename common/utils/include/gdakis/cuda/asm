@@ -1,0 +1,39 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_ASM
+#define GDAKIS_CUDA_ASM
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+
+// @file gdakis/cuda/asm
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(asm) {
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+    //! @brief Wrapper for PTX `bfind` instruction
+    //! @tparam Type for `bfind`
+    //! @param value Input to pass to `bfind`
+    //! @return Return value of `bfind`
+template<typename _Tp>
+__device__
+static inline
+int bfind(const _Tp & value) noexcept;
+
+#endif
+
+}
+}
+
+#include "impl/asm"
+
+namespace gdakis::cuda {
+using namespace ::gdakis::utils::cuda::___asm;
+}
+
+#endif

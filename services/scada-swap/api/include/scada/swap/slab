@@ -1,0 +1,51 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_SLAB
+#define SCADA_SWAP_SLAB
+
+//! @file scada/swap/slab
+
+#include <scada/swap/__cuda_compat>
+#include <scada/swap/slab_id>
+
+#include <scada/__scada_swap_version>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(slab) {
+
+//! @brief Slab type for allocated slabs from store
+//! @tparam _Tp Data type stored in slab
+//! @tparam _Store Store data type
+template<typename _Tp, typename _Store>
+class slab {
+protected:
+    //! @brief Reference to the store from which the slab is allocated
+    _Store & store_;
+    //! @brief ID of the slab
+    slab_id_type id_;
+    //! @brief Size of slab
+    std::size_t n_elems_;
+
+public:
+    //! @brief Constructor for slab object
+    //! @param id ID of the slab
+    //! @param n_elems Size of slab
+    slab(_Store & store, slab_id_type id, std::size_t n_elems) noexcept;
+
+    //! @brief Getter for slab ID
+    //! @return Slab ID
+    inline constexpr slab_id_type id() const noexcept;
+
+    //! @brief Getter for number of elements in slab
+    //! @return Number of elements in slab
+    inline std::size_t size() const noexcept;
+};
+
+}}
+
+#include "impl/slab"
+
+#endif

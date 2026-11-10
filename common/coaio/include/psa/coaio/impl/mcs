@@ -1,0 +1,51 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PSA_COAIO_IMPL_MCS
+#define PSA_COAIO_IMPL_MCS
+
+#include <cassert>
+
+namespace psa { namespace coaio {
+
+inline mcs::node::node(mcs & mutex) noexcept : mutex_(mutex), next_(nullptr), locked_(false) {
+    mutex_.lock(*this);
+}
+
+inline mcs::node::~node() noexcept {
+    mutex_.unlock(*this);
+}
+
+inline mcs::mcs() noexcept : tail_(nullptr) {}
+
+inline void mcs::lock(mcs::node & node) noexcept {
+    assert(node.next_.load(std::memory_order_acquire) == nullptr);
+    assert(node.locked_.load(std::memory_order_acquire) == false);
+
+    mcs::node * previous = tail_.exchange(&node, std::memory_order_acquire);
+    if (previous != nullptr) {
+        node.locked_.store(true, std::memory_order_relaxed);
+        previous->next_.store(&node, std::memory_order_release);
+        while (node.locked_.load(std::memory_order_acquire))
+            ;
+    }
+}
+
+inline void mcs::unlock(mcs::node & node) noexcept {
+    if (node.next_.load(std::memory_order_acquire) == nullptr) {
+        mcs::node * current = &node;
+        if (tail_.compare_exchange_strong(current, nullptr, std::memory_order_release, std::memory_order_relaxed)) {
+            return;
+        }
+
+        while (node.next_.load(std::memory_order_acquire) == nullptr)
+            ;
+    }
+    node.next_.load(std::memory_order_relaxed)->locked_.store(false, std::memory_order_release);
+}
+
+}}
+
+#endif

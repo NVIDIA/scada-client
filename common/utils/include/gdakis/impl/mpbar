@@ -1,0 +1,105 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IMPL_MPBAR
+#define GDAKIS_IMPL_MPBAR
+
+#include <limits>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(mpbar) {
+
+inline mpbar::mpbar(unsigned expected) : expected_(expected), pending_(expected), phase_(0), cancelled_(false) {
+    pthread_mutexattr_t mutex_attr;
+
+    if (pthread_mutexattr_init(&mutex_attr) != 0) {
+        throw std::system_error();
+    }
+    if (pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED) != 0) {
+        throw std::system_error();
+    }
+    if (pthread_mutex_init(&mutex_, &mutex_attr) != 0) {
+        throw std::system_error();
+    }
+
+    if (sem_init(&sem_, 1, 0) != 0) {
+        throw std::system_error();
+    }
+}
+
+inline typename mpbar::arrival_token mpbar::__arrive(unsigned n) {
+    if (pthread_mutex_lock(&mutex_) != 0)
+        throw std::system_error();
+
+    auto token = (phase_ + 1) & 0x1;
+    auto old = pending_--;
+    if (old == n) {
+        pending_ = expected_;
+        phase_++;
+        sem_post(&sem_);
+    }
+    if (pthread_mutex_unlock(&mutex_) != 0)
+        throw std::system_error();
+    return token;
+}
+
+inline bool mpbar::__wait(arrival_token && token) {
+    if (pthread_mutex_lock(&mutex_) != 0)
+        throw std::system_error();
+    bool ret = cancelled_ == false;
+    while (token != (phase_ & 0x1) && ret == true) {
+        if (pthread_mutex_unlock(&mutex_) != 0)
+            throw std::system_error();
+        if (cancelled_.load()) {
+            return false;
+        }
+        if (sem_wait(&sem_) != 0)
+            throw std::system_error();
+        if (sem_post(&sem_) != 0)
+            throw std::system_error();
+        if (pthread_mutex_lock(&mutex_) != 0)
+            throw std::system_error();
+        ret = cancelled_ == false;
+    }
+    if (pthread_mutex_unlock(&mutex_) != 0)
+        throw std::system_error();
+    return ret;
+}
+
+inline typename mpbar::arrival_token mpbar::arrive(unsigned n) {
+    return __arrive(n);
+}
+
+inline bool mpbar::wait(arrival_token && token) {
+    return __wait(std::move(token));
+}
+
+inline bool mpbar::arrive_and_wait() {
+    auto token = __arrive(1);
+    return __wait(std::move(token));
+}
+
+inline void mpbar::arrive_and_drop() {
+    if (pthread_mutex_lock(&mutex_) != 0)
+        throw std::system_error();
+    --expected_;
+    if (pthread_mutex_unlock(&mutex_) != 0)
+        throw std::system_error();
+    arrive();
+}
+
+inline void mpbar::cancel() {
+    cancelled_.store(true);
+    if (sem_post(&sem_) != 0)
+        throw std::system_error();
+}
+
+inline unsigned constexpr mpbar::max() noexcept {
+    return std::numeric_limits<unsigned>::max();
+}
+
+}}
+
+#endif

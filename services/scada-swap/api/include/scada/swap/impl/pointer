@@ -1,0 +1,37 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP___IMPL_POINTER
+#define SCADA_SWAP___IMPL_POINTER
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(pointer) {
+
+template<typename _Portal>
+inline constexpr __host__ __device__ pointer_type<_Portal>::pointer_type(
+    portal_type * portal, index_type index) noexcept
+    : portal_(portal),
+      index_(index) {}
+
+template<typename _Portal>
+inline constexpr __host__ __device__ typename pointer_type<_Portal>::reference_type
+pointer_type<_Portal>::operator*() const noexcept {
+    return reference_type(portal_, index_);
+}
+
+template<typename _Portal>
+inline constexpr __host__ __device__ pointer_type<_Portal> pointer_type<_Portal>::operator+(
+    const std::size_t & i) const noexcept {
+    return pointer_type(portal_, index_ + i);
+}
+
+template<typename _Portal>
+inline constexpr __host__ __device__ bool pointer_type<_Portal>::operator!=(const pointer_type & other) const noexcept {
+    return other.portal_ != portal_ or other.index_ != index_;
+}
+
+}}
+
+#endif

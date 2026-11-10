@@ -1,0 +1,307 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_ADSC_CACHE
+#define GDAKIS_ADSC_CACHE
+
+#include <cstddef>
+#include <gdakis/adsc/__adsc_cuda_compat>
+#include <gdakis/adsc/__adsc_version>
+#include <gdakis/adsc/cl_reference>
+#include <gdakis/adsc/policies>
+#include <gdakis/adsc/util>
+#include <gdakis/atomic>
+#include <gdakis/cuda/regs>
+#include <gdakis/seqlock>
+#include <gdakis/umem/mem>
+#include <psa/result>
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+#  include <gdakis/umem/cuda>
+#endif
+#if defined(__CUDACC__)
+#  include <cooperative_groups.h>
+#  include <cooperative_groups/reduce.h>
+#endif
+
+GDAKIS_ADSC_SIMPLE_NS {
+GDAKIS_ADSC_UNIT(cache) {
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+template<typename _Cache, typename _Policies>
+__global__ void flush_kernel(_Cache * cache, _Policies policies);
+
+#endif
+
+template<thread_scope _Sco, typename _CL_Ref, unsigned _Ways>
+class cache {
+public:
+    using cl_ref_type = _CL_Ref;
+
+    using key_type = typename cl_ref_type::key_type;
+    using val_type = typename cl_ref_type::val_type;
+    using meta_type = typename cl_ref_type::meta_type;
+    using set_meta_type = typename cl_ref_type::set_meta_type;
+    using cl_id_type = typename cl_ref_type::cl_id_type;
+    constexpr static std::size_t cl_size = cl_ref_type::cl_size;
+    constexpr static std::size_t num_ways = _Ways;
+
+    constexpr static cl_id_type invalid_cl_id = cl_ref_type::invalid_cl_id();
+
+    using set_id_type = unsigned;
+
+    using seqlock = gdakis::seqlock<_Sco>;
+    template<typename _T>
+    using atomic = gdakis::atomic<_T, _Sco>;
+
+    template<typename _Tp>
+    using result = psa::result<_Tp, int>;
+
+    template<typename _Allocator>
+    class handle {
+    public:
+        template<typename _T>
+        using ptr = gdakis::umem::ptr_type<_T>;
+
+    private:
+        ptr<cl_id_type> cl_ids_;
+        ptr<meta_type> meta_;
+        ptr<set_meta_type> set_meta_;
+        ptr<cl_ref_type> cl_refs_;
+        ptr<seqlock> set_seqlocks_;
+        ptr<seqlock> cl_seqlocks_;
+        ptr<unsigned> set_cnts_;
+        std::size_t num_cls_;
+        ptr<cache> cache_;
+
+    public:
+        handle(std::size_t, val_type *, ptr<cl_id_type> &&, ptr<meta_type> &&, ptr<set_meta_type> &&,
+            ptr<cl_ref_type> &&, ptr<seqlock> &&, ptr<seqlock> &&, ptr<unsigned> &&, ptr<cache> &&) noexcept;
+        handle(handle &&) noexcept = default;
+        ~handle() noexcept = default;
+        cache * get() const noexcept;
+        std::size_t num_cls() const noexcept;
+
+        void invalidate_cache() const noexcept;
+
+        template<typename _Policies>
+        void flush_cache(const _Policies &) const noexcept;
+
+        meta_type * get_meta() const noexcept;
+        set_meta_type * get_set_meta() const noexcept;
+    };
+
+protected:
+    std::size_t num_cls_;
+    std::size_t num_sets_;
+    seqlock * set_seqlocks_;
+    seqlock * cl_seqlocks_;
+    unsigned * set_cnts_;
+
+    cl_id_type * cl_ids_;
+    val_type * vals_;
+    meta_type * meta_;
+    set_meta_type * set_meta_;
+
+    cl_ref_type * cl_refs_;
+
+    const policies_type<undefined_policy_type, undefined_policy_type, undefined_policy_type, undefined_policy_type,
+        undefined_policy_type, undefined_policy_type, undefined_policy_type>
+        default_policies_ = policies_type(undefined_policy(), undefined_policy(), undefined_policy(),
+            undefined_policy(), undefined_policy(), undefined_policy(), undefined_policy());
+
+public:
+    __host__ __device__ cache() = delete;
+
+    __host__ __device__ cache(std::size_t, val_type *, cl_id_type *, meta_type *, set_meta_type *, cl_ref_type *,
+        seqlock *, seqlock *, unsigned *) noexcept;
+
+    __host__ __device__ std::size_t num_cls() const noexcept;
+
+    __host__ __device__ cl_ref_type & cl_ref(const set_id_type, const unsigned) noexcept;
+
+    __host__ __device__ cl_id_type & cl_id(const cl_ref_type &) noexcept;
+
+    template<typename _Policies>
+    __host__ __device__ cl_id_type cl_id(const key_type &, const _Policies &) const noexcept;
+
+    template<typename _Policies>
+    __host__ __device__ unsigned cl_offset(const key_type &, const _Policies &) const noexcept;
+
+    template<typename _Policies>
+    __host__ __device__ set_id_type set_id(const cl_id_type, const _Policies &) const noexcept;
+
+    template<typename _Policies>
+    __host__ __device__ key_type nth_key_of_cl(const cl_id_type, const unsigned, const _Policies &) const noexcept;
+
+    __host__ __device__ cl_id_type & cl_id(const set_id_type, const unsigned) noexcept;
+
+    __host__ __device__ seqlock & cl_seqlock(const set_id_type, const unsigned) noexcept;
+
+    __host__ __device__ seqlock & set_seqlock(const set_id_type) noexcept;
+
+    __host__ __device__ val_type * val(const set_id_type, unsigned, std::size_t) noexcept;
+
+    __host__ __device__ void invalidate_cl(cl_ref_type &) const noexcept;
+
+    template<typename _Policies>
+    __host__ __device__ void flush_cl(cl_ref_type &, const _Policies &) noexcept;
+
+    /* independent thread access apis */
+    template<typename _Access_Policies>
+    __host__ __device__ int get(const key_type &, val_type &, const _Access_Policies & policies) noexcept;
+
+    template<typename _Access_Policies>
+    //! A single-value cache line is fully overwritten, so its miss policy is not invoked.
+    __host__ __device__ int put(const key_type &, const val_type &, const _Access_Policies & policies) noexcept;
+
+    __host__ __device__ int get(const key_type &, val_type &) noexcept;
+
+    __host__ __device__ int put(const key_type &, const val_type &) noexcept;
+
+#if defined(__CUDACC__)
+    /* CG access apis */
+    template<typename _Group, typename _Access_Policies>
+    __device__ int get_group(const _Group &, const key_type &, val_type &, const _Access_Policies & policies) noexcept;
+
+    template<typename _Group, typename _Access_Policies>
+    //! A single-value cache line is fully overwritten, so its miss policy is not invoked.
+    __device__ int put_group(
+        const _Group &, const key_type &, const val_type &, const _Access_Policies & policies) noexcept;
+
+    template<typename _Group>
+    __device__ int get_group(const _Group &, const key_type &, val_type &) noexcept;
+
+    template<typename _Group>
+    __device__ int put_group(const _Group &, const key_type &, const val_type &) noexcept;
+
+    //! @brief Copy cache line data to destination buffer using cooperative group
+    //! @tparam _Group Cooperative group type
+    //! @param group Cooperative group performing the copy
+    //! @param set_id Set ID of the cache line
+    //! @param way Way within the set
+    //! @param dst Destination buffer pointer
+    //! @param bytes Number of bytes to copy
+    template<typename _Group>
+    __device__ void copy_cl_data(const _Group & group, const set_id_type set_id, const unsigned way, val_type * dst,
+        const size_t bytes) noexcept;
+
+    //! @brief Async cache line acquisition for async I/O
+    //! @tparam _Group Cooperative group type
+    //! @tparam _Access_Policies Policy types
+    //! @tparam _Victim_Processing Victim handler function type
+    //! @param group Cooperative group performing the operation
+    //! @param cl_id Cache line ID to access
+    //! @param set_id Output: Set ID where cache line is/will be located
+    //! @param way Output: Way within the set
+    //! @param is_cache_hit Output: true if cache hit, false if miss (I/O needed)
+    //! @param policies Access policies (key_to_cl_id, cl_to_set, etc.)
+    //! @param victim_process Victim handler callback
+    //! @return 0 on success (with CL lock held), error code on failure
+    template<typename _Group, typename _Access_Policies, typename _Victim_Processing>
+    __device__ int access_async_group(const _Group & group, const cl_id_type & cl_id, set_id_type & set_id,
+        unsigned & way, bool & is_cache_hit, const _Access_Policies & policies,
+        _Victim_Processing && victim_process) noexcept;
+#endif
+
+    //! @brief Release async cache line lock (counterpart to access_async_group)
+    //! @tparam _Group Cooperative group type
+    //! @param group Cooperative group performing the operation
+    //! @param set_id Set ID of the cache line to release
+    //! @param way Way within the set to release
+    template<typename _Group>
+    __host__ __device__ void async_epilogue(
+        const _Group & group, const set_id_type set_id, const unsigned way) noexcept;
+
+protected:
+    template<typename _Group>
+    __host__ __device__ unsigned search_ways_group(const _Group &, const cl_id_type, const set_id_type) const noexcept;
+
+    // Async cache line acquisition methods (internal implementation for access_async_group)
+    template<typename _Group, typename _Access_Policies>
+    __host__ __device__ int async_hit_prologue(
+        const _Group &, const cl_id_type &, set_id_type &, unsigned &, const _Access_Policies &) noexcept;
+
+    template<typename _Group, typename _Access_Policies, typename _Evict_Processing, typename _Victim_Processing>
+    __host__ __device__ int async_miss_prologue(const _Group &, const cl_id_type &, set_id_type &, unsigned &,
+        const _Access_Policies &, _Evict_Processing &&, _Victim_Processing &&) noexcept;
+
+    /* policy selection */
+    template<typename _Access_Policies>
+    __host__ __device__ unsigned evict_thread(const set_id_type, const _Access_Policies &) noexcept;
+
+    template<typename _Access_Policies>
+    __host__ __device__ int miss_thread(const set_id_type, const unsigned, const _Access_Policies &) noexcept;
+
+    template<typename _Access_Policies>
+    __host__ __device__ int victim_thread(const set_id_type, const unsigned, const _Access_Policies &) noexcept;
+
+#if defined(__CUDACC__)
+    template<typename _Group, typename _Access_Policies>
+    __device__ unsigned evict_group(const _Group &, const set_id_type, const _Access_Policies &) noexcept;
+
+    template<typename _Group, typename _Access_Policies>
+    __device__ int miss_group(const _Group &, const set_id_type, const unsigned, const _Access_Policies &) noexcept;
+
+    template<typename _Group, typename _Access_Policies>
+    __device__ int victim_group(const _Group &, const set_id_type, const unsigned, const _Access_Policies &) noexcept;
+#endif
+
+    /* helpers */
+    template<typename _Access_Policies>
+    __host__ __device__ int __victim_thread(
+        unsigned &, const set_id_type &, const unsigned, const cl_id_type &, const _Access_Policies &) noexcept;
+
+    template<typename _Access_Policies>
+    __host__ __device__ int __miss_thread(
+        unsigned &, const set_id_type &, const unsigned, const cl_id_type &, const _Access_Policies &) noexcept;
+
+    template<typename _Access_Policies>
+    __host__ __device__ unsigned __evict_thread(unsigned &, const set_id_type, const _Access_Policies &) noexcept;
+
+    template<typename _Group, typename _Access_Policies, typename _Evict_Processing, typename _Victim_Processing,
+        typename _Fill_Processing>
+    __host__ __device__ int miss_prologue(const _Group &, const cl_id_type & cl_id, const unsigned cl_offset,
+        const val_type &, unsigned &, const _Access_Policies &, _Evict_Processing &&, _Victim_Processing &&,
+        _Fill_Processing &&) noexcept;
+
+    template<typename _Group>
+    __host__ __device__ void miss_epilogue(
+        const _Group &, const cl_id_type &, const set_id_type, const unsigned) noexcept;
+
+    template<typename _Group, typename _Access_Policies, typename _Memcpy>
+    __host__ __device__ int __get_hit_group(
+        const _Group &, const cl_id_type &, const unsigned, val_type &, const _Access_Policies &, _Memcpy &&) noexcept;
+
+    template<typename _Access_Policies, typename _Memcpy>
+    __host__ __device__ int __get_hit_war(
+        unsigned &, const cl_id_type &, const unsigned, val_type &, const _Access_Policies &, _Memcpy &&) noexcept;
+
+#if defined(__CUDACC__)
+    template<typename _Group, typename _Access_Policies>
+    __device__ int __victim_group(
+        const _Group &, const set_id_type &, const unsigned, const cl_id_type &, const _Access_Policies &) noexcept;
+
+    template<typename _Group, typename _Access_Policies>
+    __device__ int __miss_group(
+        const _Group &, const set_id_type &, const unsigned, const cl_id_type &, const _Access_Policies &) noexcept;
+
+    template<typename _Group, typename _Access_Policies>
+    __device__ unsigned __evict_group(const _Group &, const set_id_type, const _Access_Policies &) noexcept;
+#endif
+
+public:
+    template<typename _Allocator>
+    static inline handle<_Allocator> build(std::size_t, typename _CL_Ref::val_type *) noexcept;
+};
+
+}}
+
+#include "impl/cache"
+
+GDAKIS_ADSC_SIMPLE_EXPORT_NS(gdakis::adsc, cache)
+
+#endif

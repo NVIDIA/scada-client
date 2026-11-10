@@ -1,0 +1,36 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_LOG2
+#define GDAKIS_LOG2
+
+#include <gdakis/__utils_version>
+
+//! @file gdakis/log2
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(log2) {
+
+//! @brief Type to compute the logarithm base-2 of a value at compile time
+//! @tparam Value Value to compute the logarithm base-2
+template<size_t Value>
+struct static_log2 {
+    static_assert((Value & 0x1) == 0, "Cannot compute log2 of a non power-of-two value");
+    //! @brief Logarithm base-2 of the value
+    static constexpr unsigned value = static_log2<(Value >> 1)>::value + 1;
+};
+
+//! @brief Type to compute the logarithm base-2 of 1 at compile time
+template<>
+struct static_log2<1> {
+    //! @brief Logarithm base-2 of 1
+    static constexpr unsigned value = 0;
+};
+
+}}
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, log2)
+
+#endif

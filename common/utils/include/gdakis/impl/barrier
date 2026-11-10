@@ -1,0 +1,68 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IMPL_BARRIER
+#define GDAKIS_IMPL_BARRIER
+
+#include <limits>
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(barrier) {
+
+inline void barrier::noop::operator()() const noexcept {}
+
+template<typename _CompletionFunction>
+inline barrier::barrier(std::ptrdiff_t expected, _CompletionFunction f)
+    : expected_(expected),
+      pending_(expected),
+      completion_(std::move(f)) {}
+
+template<typename _Lock>
+inline barrier::arrival_token barrier::__arrive(std::ptrdiff_t n, _Lock && lock) {
+    auto token = (phase_ + 1) & 0x1;
+    ;
+    pending_ -= n;
+    if (pending_ == 0) {
+        completion_();
+        pending_ = expected_;
+        ++phase_;
+        cv_.notify_all();
+    }
+    return token;
+}
+
+template<typename _Lock>
+inline void barrier::__wait(arrival_token && token, _Lock && lock) const {
+    cv_.wait(lock, [&] { return token == (phase_ & 0x1); });
+}
+
+inline barrier::arrival_token barrier::arrive(std::ptrdiff_t n) {
+    std::scoped_lock lock(mutex_);
+    return __arrive(n, lock);
+}
+
+inline void barrier::wait(arrival_token && token) const {
+    std::unique_lock lock(mutex_);
+    __wait(std::move(token), std::move(lock));
+}
+
+inline void barrier::arrive_and_wait() {
+    auto token = arrive();
+    wait(std::move(token));
+}
+
+inline void barrier::arrive_and_drop() {
+    std::scoped_lock lock(mutex_);
+    --expected_;
+    __arrive(1, std::move(lock));
+}
+
+inline constexpr std::ptrdiff_t barrier::max() noexcept {
+    return std::numeric_limits<std::ptrdiff_t>::max();
+}
+
+}}
+
+#endif

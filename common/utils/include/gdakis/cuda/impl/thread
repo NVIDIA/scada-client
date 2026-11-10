@@ -1,0 +1,26 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_CUDA_IMPL_THREAD
+#define GDAKIS_CUDA_IMPL_THREAD
+
+#include <gdakis/__utils_version>
+#include <gdakis/cuda/regs>
+#include <gdakis/cuda/warp>
+
+namespace gdakis::utils::cuda {
+GDAKIS_UTILS_UNIT(thread) {
+
+#if defined(__CUDACC__)
+
+__device__ inline bool this_thread::is_leader(unsigned mask) noexcept {
+    return laneid() == this_warp::leader(mask);
+}
+
+#endif
+
+}}
+
+#endif

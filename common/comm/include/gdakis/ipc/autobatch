@@ -1,0 +1,222 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IPC_AUTOBATCH
+#define GDAKIS_IPC_AUTOBATCH
+
+#include <optional>
+
+#include <gdakis/atomic>
+#include <gdakis/autobatch>
+#include <gdakis/ipc/protocol>
+#include <gdakis/ipc/shmem>
+#include <gdakis/none>
+#include <gdakis/umem/mem>
+#include <psa/result>
+
+//! @file gdakis/ipc/autobatch
+
+namespace gdakis::comm::ipc {
+
+//! @brief A buffer containing work request entries
+//!
+//! This class provides the logic for autobatch to submit and reuse the buffer, but does not allocate the memory to hold the work request entries
+//! @tparam _Entry Type of the work request entry
+//! @tparam _Device Device type of the memory backing this buffer
+template<typename _Entry, device_type _Device>
+class work_buffer {
+protected:
+    //! @brief Type defining the control structure to submit work buffers for the target device type
+    using request_buffer_control_type = request_buffer_control<_Device>;
+
+    //! @brief Number of entries in the buffer
+    unsigned size_;
+
+    //! @brief Memory address where the buffer memory is allocated.
+    // This variable might be only valid on the code running on the target device (e.g., GPU)
+    _Entry * data_;
+
+    //! @brief Memory address of the control data structure that allows submitting this buffer
+    request_buffer_control_type * control_;
+
+    //! @brief Type of the handle that allows holding a reference to the submission control structure on CPU code
+    using arrive_handle = typename request_buffer_control_type::barrier_type::arrival_token;
+
+    //! @brief Index is zero when this work buffer holds a valid barrier arrival token
+    unsigned index_;
+
+    //! @brief This union holds the barrier arrival token to wait before being able to reuse its contents
+    union {
+        //! @brief Barrier arrival token to wait for before reusing this buffer
+        arrive_handle token_;
+        //! @brief Placeholder when the buffer is not waiting to be reused
+        none_type none_;
+    };
+
+public:
+    //! @brief Default constructor
+    //! @param size Number of entries in the buffer
+    //! @param entries Memory address holding the entries for this buffer
+    //! @param control Memory address holding the submission control structure for this buffer
+    __host__ __device__ work_buffer(unsigned size, _Entry * entries, request_buffer_control_type * control) noexcept;
+
+    //! @brief Wait for the buffer to be reusable
+    __host__ __device__ void acquire() noexcept;
+
+    //! @brief Notify this buffer might be submitted in the future
+    __host__ __device__ void enable() noexcept;
+
+    //! @brief Submit a number of contiguous work request entries in this buffer starting at index zero
+    //! @param size Number of work request entries to submit
+    __host__ __device__ void commit(unsigned size) noexcept;
+
+    //! @brief Return the number of work request entries in this buffer
+    //! @returns Number of work request entries in the buffer
+    __host__ __device__ unsigned size() const noexcept;
+
+    //! @brief Set the contents of one work request entry in this buffer
+    //! @param position Index of the work request entry to set
+    //! @param fn Functor that initializes the work request entry
+    template<typename _Fn>
+    __host__ __device__ void set(unsigned position, _Fn && fn) noexcept;
+};
+
+//! @cond show_detail_namespace
+namespace {
+
+template<typename _Allocator>
+struct __device_selector;
+
+template<>
+struct __device_selector<umem::cpu> {
+    static constexpr gdakis::comm::device_type device_type = gdakis::comm::device_type::cpu;
+};
+
+#if __has_include(<cuda.h>)
+template<>
+struct __device_selector<umem::cuda> {
+    static constexpr gdakis::comm::device_type device_type = gdakis::comm::device_type::cuda;
+};
+#endif
+
+}
+//! @endcond
+
+//! @brief Autobatch to submit work using shared memory
+//! @tparam _Allocator GDAKIS allocator that determines the memory where the autobatch is allocated
+//! @tparam _Entry Work request entry type
+//! @tparam _Sco Synchronization scope
+//! @tparam _NumBuffers The number of buffers in the autobatch
+//! @tparam _Device Device type accessing this autobatch, by default the device type associated to the _Allocator
+template<typename _Allocator, typename _Entry, thread_scope _Sco, size_t _NumBuffers,
+    device_type _Device = __device_selector<_Allocator>::device_type>
+class autobatch : public gdakis::comm::autobatch<work_buffer<_Entry, _Device>, _Sco, _NumBuffers> {
+public:
+    //! @brief Handle type that owns the autobatch resources
+    class handle {
+    public:
+        //! @brief Submission control type
+        using request_buffer_control_type = request_buffer_control<_Device>;
+
+        //! @brief Return type for handle creation
+        using result_type = psa::result<handle, int>;
+
+        //! @brief Pointer type to work request entries
+        using entry_ptr = ptr<_Allocator, _Entry>;
+
+        //! @brief Pointer type to submission control
+        using control_ptr = ptr<_Allocator, request_buffer_control_type>;
+
+        //! @brief Backend type implementing device-specific operations
+        using backend_type = typename allocator_backend<_Allocator>::type;
+
+        //! @brief Autobatch registration request type
+        using request_type = message<operation::register_request_buffers, backend_type>;
+
+        //! @brief Autobatch registration response type
+        using response_type = acknowledge<operation::register_request_buffers, backend_type>;
+
+    protected:
+        //! @brief Number of work request entries on each buffer
+        size_t buffer_size_;
+
+        //! @brief Pointer to all work request entries in all buffers
+        entry_ptr entries_;
+
+        //! @brief Pointer to all control submission structures
+        control_ptr control_;
+
+        //! @brief Pointer to autobach structure accessible from the device associated to the autobatch
+        umem::ptr_type<autobatch> autobatch_;
+
+        //! @brief Identifier assigned to the autobatch upon successful registration on the server
+        std::optional<unsigned> id_;
+
+    public:
+        //! @brief Default constructor
+        //! @param size Number of work request entries per buffer
+        //! @param entries Pointer to work request entries for all buffers
+        //! @param control Pointer to submission control structures for all buffers
+        //! @param autobatch Pointer to autobatch on the associated device
+        handle(
+            size_t size, entry_ptr && entries, control_ptr && control, umem::ptr_type<autobatch> && autobatch) noexcept;
+
+        //! @brief Default move constructor
+        handle(handle &&) noexcept = default;
+
+        //! @brief Default destructor
+        ~handle() noexcept;
+
+        //! @brief Builds a new autobatch and returns the owning handler
+        //! @param size Number of entries per buffer
+        //! @return Result type containing the handle owning the buffer, or an error if the operation fails
+        static result_type build(size_t size) noexcept;
+
+        //! @brief Imports an autobatch owned by another entity and returns the owning handler
+        //! @param size Number of work request entries per buffer
+        //! @param control_handle IPC handle to submission control memory
+        //! @param control_ancillary IPC ancillary to submission control memory
+        //! @param entries_handle IPC handle to work request entries
+        //! @param entries_ancillary IPC ancillary to work request entries
+        //! @return Result type containing the handle owning the imported buffer, or an error if the operation fails
+        static result_type import(unsigned size, typename control_ptr::handle_type && control_handle,
+            const typename control_ptr::ancillary_type & control_ancillary,
+            typename entry_ptr::handle_type && entries_handle,
+            const typename entry_ptr::ancillary_type & entries_ancillary) noexcept;
+
+        //! @brief Build a registration request for the autobuffer
+        //! @returns Registration request, or an error if the operation fails
+        psa::result<request_type, int> request() const noexcept;
+
+        //! @brief Register autobuffer in a server
+        //! @tparam _Socket Socket type to send the registration through
+        //! @param socket Socket to send the registration through
+        //! @return Return type of the _Socket send operation
+        template<typename _Socket>
+        auto send_to_server(_Socket & socket) noexcept;
+
+        //! @brief Get pointer to autobuffer structure
+        //! The pointer type might be only valid in the device type the autobuffer is bound to
+        //! @return Pointer to autobuffer
+        autobatch * get() const noexcept;
+
+        //! @brief Get identifier assigned to autobuffer upon registration
+        //! @return Assigned identifier or none if not registered
+        const std::optional<unsigned> & id() const noexcept;
+    };
+
+public:
+    //! @brief Autobatch constructor
+    //! @tparam Args Argument types to pass to base autobatch
+    //! @param ...args Arguments to pass to base autobatch
+    template<typename... Args>
+    __host__ __device__ autobatch(Args &&... args) noexcept;
+};
+
+}
+
+#include "impl/autobatch"
+
+#endif

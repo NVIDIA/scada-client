@@ -1,0 +1,127 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_IPC_MEMORY_BUFFER
+#define GDAKIS_IPC_MEMORY_BUFFER
+
+#include <optional>
+
+#include <psa/result>
+
+#include <gdakis/ipc/protocol>
+#include <gdakis/ipc/shmem>
+
+//! @file gdakis/ipc/memory_buffer
+
+namespace gdakis::comm::ipc {
+
+//! @brief Memory buffer using shared memory
+//! @tparam _Td Data type stored in the memory buffer
+template<typename _Td>
+class memory_buffer {
+public:
+    //! @brief Handler type owning the resources of the memory buffer
+    //! @tparam _Allocator GDAKIS allocator that determines the memory where the autobatch is allocated
+    template<typename _Allocator>
+    class handle {
+    protected:
+        //! @brief Pointer type to the data the memory buffer
+        using data_ptr = dma_ptr<_Allocator, _Td>;
+
+        //! @brief Return type for memory buffer creation
+        using result_type = psa::result<handle, int>;
+
+        //! @brief Number of elements in the buffer
+        unsigned size_;
+
+        //! @brief Pointer to the buffer data
+        data_ptr data_;
+
+        //! @brief Identifier assigned to the buffer upon successful registration on the server
+        std::optional<int> id_;
+
+        //! @brief Backend type implementing device-specific operations
+        using backend_type = allocator_backend_t<_Allocator>;
+
+        //! @brief Memory buffer registration request type
+        using request_type = message<operation::register_memory_buffer, backend_type>;
+
+        //! @brief Memory buffer registration response type
+        using response_type = acknowledge<operation::register_memory_buffer, backend_type>;
+
+        //! @brief Build a registration request for the memory buffer
+        //! @returns Registration request, or an error if the operation fails
+        psa::result<request_type, int> request() const noexcept;
+
+        //! @brief Memory buffer constructor
+        //! @param num_elements Number of elements of the buffer type in the buffer
+        //! @param data Pointer to the buffer data
+        handle(unsigned num_elements, data_ptr && data) noexcept;
+
+    public:
+//! @brief Default move constructor
+#pragma nv_exec_check_disable
+        handle(handle &&) noexcept = default;
+
+//! @brief Default destructor
+#pragma nv_exec_check_disable
+        ~handle() noexcept = default;
+
+        //! @brief Builds a new memory buffer
+        //! @tparam _Fn Functor type to initialize the memory buffer
+        //! @param num_elements Number of elements of the buffer type in the buffer
+        //! @param fn Functor to initialize the memory buffer
+        template<typename _Fn>
+        static result_type build(unsigned num_elements, _Fn && fn) noexcept;
+
+        //! @brief Register memory buffer in a server
+        //! @tparam _Socket Socket type to send the registration through
+        //! @param socket Socket to send the registration through
+        //! @return Return type of the _Socket send operation
+        template<typename _Socket>
+        auto send_to_server(_Socket & socket) noexcept;
+
+        //! @brief Get the memory buffer
+        //! @return Memory buffer pool
+        memory_buffer get() const noexcept;
+
+        //! @brief Get identifier assigned to the I/O buffer pool upon registration
+        //! @return Assigned identifier or none if not registered
+        const std::optional<int> id() const noexcept;
+    };
+
+protected:
+    //! @brief Memory buffer identifier
+    int id_;
+    //! @brief Number of blocks in the memory buffer
+    unsigned num_blocks_;
+    //! @brief Pointer to the data
+    _Td * data_;
+
+    //! @brief Constructor
+    //! @param id Memory buffer identifier
+    //! @param num_blocks Number of blocks in the memory buffer
+    //! @param data Pointer to the data
+    memory_buffer(int id, unsigned num_blocks, _Td * data) noexcept;
+
+public:
+    //! @brief Get the I/O buffer pointer identifier
+    //! @returns I/O buffer pool identifier
+    __host__ __device__ int id() const noexcept;
+
+    //! @brief Get the number of blocks in the memory buffer
+    //! @return Number of blocks in the memory buffer
+    __host__ __device__ unsigned number_of_blocks() const noexcept;
+
+    //! @brief Get pointer to the memory buffer data
+    //! @return Pointer to the memory buffer data
+    __host__ __device__ _Td * data() const noexcept;
+};
+
+}
+
+#include "impl/memory_buffer"
+
+#endif

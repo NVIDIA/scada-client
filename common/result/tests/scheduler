@@ -1,0 +1,175 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef TESTS_SCHEDULER
+#define TESTS_SCHEDULER
+
+#include <psa/futures>
+
+#if defined(__psa_use_coroutines)
+#   include <coroutine>
+#   include <list>
+#endif
+
+//#define __psa_verbose_scheduler
+
+template<typename _Ok = bool, typename _Err = int>
+struct scheduler {
+
+    struct scope_type : std::coroutine_handle<> {
+
+        inline scope_type(std::coroutine_handle<> && h) noexcept :
+            std::coroutine_handle<>(std::move(h))
+        {
+        }
+
+        scope_type(const scope_type &) = delete;
+        scope_type(scope_type &&) noexcept = default;
+
+        inline ~scope_type() {
+        }
+
+        struct promise_type {
+            inline promise_type() noexcept {
+            #if defined(__psa_verbose_scheduler)
+                std::cerr << "[" << this << "] Scheduler Scope Created" << std::endl;
+            #endif
+            }
+
+            inline ~promise_type() noexcept {
+            #if defined(__psa_verbose_scheduler)
+                std::cerr << "[" << this << "] Scheduler Scope Destroyed" << std::endl;
+            #endif
+            }
+
+            inline scope_type 
+            get_return_object() noexcept {
+                return scope_type(std::coroutine_handle<promise_type>::from_promise(*this));
+            }
+
+            inline std::suspend_always
+            initial_suspend() const noexcept {
+            #if defined(__psa_verbose_scheduler)
+                std::cerr << "[" << this << "] Scheduler Scope Ready" << std::endl;
+            #endif
+                return {};
+            }
+
+            inline std::suspend_never
+            final_suspend() const noexcept {
+            #if defined(__psa_verbose_scheduler)
+                std::cerr << "[" << this << "] Scheduler Scope Suspended" << std::endl;
+            #endif
+                return {};
+            }
+
+            inline void
+            return_void() const noexcept { 
+            #if defined(__psa_verbose_scheduler)
+                std::cerr << "[" << this << "] Scheduler Scope Completes" << std::endl;
+            #endif
+            }
+
+            inline void
+            unhandled_exception() const noexcept {}
+        };
+   
+    };
+    
+    inline void
+    dispatcher() noexcept {
+    #if defined(__psa_verbose_scheduler)
+        std::cerr << "[" << this << "] Dispatcher Begins Scheduling Loop" << std::endl;
+    #endif
+        while(pending_.empty() == false) {
+        #if defined(__psa_verbose_scheduler)
+            std::cerr << "[" << this << "] Dispatcher Calls Pending" << std::endl;
+        #endif
+            auto pending = std::move(pending_.front());
+            assert(pending.done() == false and pending.address() != nullptr);
+            pending_.pop_front();
+            pending.resume();
+        #if defined(__psa_verbose_scheduler)
+            std::cerr << "[" << this << "] Dispatcher Completes Pending" << std::endl;
+        #endif
+        }
+    #if defined(__psa_verbose_scheduler)
+        std::cerr << "[" << this << "] Dispatcher Completes Scheduling Loop" << std::endl;
+    #endif
+        return;
+    }
+    
+
+#if defined(__psa_use_coroutines)
+    std::list<std::coroutine_handle<>>  pending_;
+#endif
+
+    using result_type = ::psa::futures::result<_Ok, _Err>;
+
+    // Interface required by futures::result<_Ok, _Err> promises
+    struct pending {
+        scheduler & scheduler_;
+    
+        inline bool is_ready() const noexcept { return false; }
+
+        inline std::function<void(void)> schedule(std::coroutine_handle<> h) noexcept {
+            assert(h.done() == false and h.address() != nullptr);
+            scheduler_.pending_.emplace_back(std::move(h));
+            return [this](){ scheduler_.dispatcher(); };
+        }
+
+        inline typename result_type::sync_type
+        value() const noexcept { return result_type::sync_type::template ok<>(); }
+    };
+
+
+    inline
+    result_type
+    ok(_Ok && value) noexcept {
+    #if defined(__psa_use_coroutines)
+        co_return result_type::sync_type::ok(std::forward<_Ok>(value));
+    #else
+        return result_type::ok(std::forward<_Ok>(value));
+    #endif
+    }
+
+    inline
+    result_type
+    err(_Err && value) noexcept {
+    #if defined(__psa_use_coroutines)
+        co_return result_type::sync_type::err(std::forward<_Err>(value));
+    #else
+        return result_type::err(std::forward<_Err>(value));
+    #endif
+    }
+
+    inline
+    result_type
+    async_ok(_Ok && value) noexcept {
+    #if defined(__psa_use_coroutines)
+        co_await pending{ *this };
+        co_return result_type::sync_type::ok(std::forward<_Ok>(value));
+    #else
+        return result_type::ok(std::forward<_Ok>(value));
+    #endif
+    }
+
+    inline
+    result_type
+    async_err(_Err && value) noexcept {
+    #if defined(__psa_use_coroutines)
+        co_await pending{ *this };
+        co_return result_type::sync_type::err(std::forward<_Err>(value));
+    #else
+        return result_type::err(std::forward<_Err>(value));
+    #endif
+    }
+
+};
+
+#endif
+
+
+// vim: set filetype=cpp :

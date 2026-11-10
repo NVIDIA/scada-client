@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+# Naming convention enforcement only.
+# Other checks are disabled to keep CI fast during rollout.
+# Set allow_failure: false in lint.yml once the codebase is clean on a changed-file basis.
+
+Checks: '-*,readability-identifier-naming'
+
+CheckOptions:
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+
+  - key: readability-identifier-naming.ClassCase
+    value: lower_case
+
+  # Template parameters use _CamelCase prefix (_Tp, _Fn, _Cache, _Levels, ...)
+  - key: readability-identifier-naming.TemplateParameterCase
+    value: CamelCase
+  - key: readability-identifier-naming.TemplateParameterPrefix
+    value: '_'
+
+  # Data members use lower_case with trailing _ (state_, buffer_, mutex_, ...)
+  - key: readability-identifier-naming.MemberCase
+    value: lower_case
+  - key: readability-identifier-naming.MemberSuffix
+    value: '_'
+
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+
+  # Constants: lower_case — matches std::string::npos, std::numeric_limits<T>::max
+  # and the dominant pattern in this codebase (null_offset_, page_size, cl_size, ...)
+  - key: readability-identifier-naming.ConstantCase
+    value: lower_case
+
+  # Enum values: lower_case (slog::level::warning, slog::level::error, ...)
+  - key: readability-identifier-naming.EnumConstantCase
+    value: lower_case
+
+HeaderFilterRegex: '^(modules|services|tools|benchmarks|examples)/'
+ExcludeHeaderFilterRegex: '^modules/unvme/kernel/'
+SystemHeaders: false

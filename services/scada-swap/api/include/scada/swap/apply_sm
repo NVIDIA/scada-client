@@ -1,0 +1,131 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_APPLY_SM
+#define SCADA_SWAP_APPLY_SM
+
+//! @file scada/swap/apply_sm
+
+#include <cuda/atomic>
+#include <scada/__scada_swap_version>
+#include <scada/swap/__cuda_compat>
+#include <scada/types>
+
+SCADA_SWAP_SIMPLE_NS {
+
+namespace apply_sm {
+
+// Use cuda::atomic directly (same as gdakis::atomic wraps)
+using cuda::atomic;
+using cuda::memory_order;
+using cuda::memory_order_acquire;
+using cuda::memory_order_relaxed;
+using cuda::memory_order_release;
+using cuda::thread_scope;
+using cuda::thread_scope_block;
+using cuda::thread_scope_system;
+
+//! @brief State enum for async I/O operations
+enum state {
+    //! @brief Initial state or allocation failed
+    invalid = 0,
+    //! @brief I/O submitted, waiting for completion
+    valid,
+    //! @brief Data available (cache hit or I/O complete)
+    ready,
+    //! @brief Processing complete, cache line lock released
+    released
+};
+
+//! @brief State tracking for async I/O requests
+//!
+//! Stores state and internal cache management details (set_id, way, cl_line).
+//! @tparam _Sco Thread scope for atomic operations (default: block-level)
+template<thread_scope _Sco = thread_scope_block>
+class state_impl {
+    // CRITICAL: state_ uses atomic operations with acquire-release ordering
+    // to ensure visibility across threads in optimized builds (-O2/-O3).
+    // The atomic MUST be properly constructed with placement new when allocated
+    // in shared memory. Without proper construction and memory ordering, threads
+    // can cache state_ in registers and miss updates from other threads, causing
+    // hangs in coop_apply.
+    atomic<state, _Sco> state_;
+
+public:
+    //! @brief Default constructor - initializes to invalid state
+    __host__ __device__ state_impl() noexcept
+        : state_(invalid),
+          cl_line_(0), // remove these and put in the cl_ref
+          set_id_(0),
+          way_(0),
+          holding_cl_lock_(false),
+          is_cache_hit_(false) {
+        //printf("DEBUG: state_impl constructor called\n");
+    }
+
+    //! @brief Query if state is invalid
+    //! @return true if state is invalid
+    __host__ __device__ bool is_invalid() const noexcept { return state_.load(memory_order_acquire) == invalid; }
+
+    //! @brief Query if state is valid
+    //! @return true if state is valid
+    __host__ __device__ bool is_valid() const noexcept { return state_.load(memory_order_acquire) == valid; }
+
+    //! @brief Query if state is ready
+    //! @return true if state is ready
+    __host__ __device__ bool is_ready() const noexcept { return state_.load(memory_order_acquire) == ready; }
+
+    //! @brief Query if state is released
+    //! @return true if state is released
+    __host__ __device__ bool is_released() const noexcept { return state_.load(memory_order_acquire) == released; }
+
+    //! @brief Set state to invalid
+    __host__ __device__ void set_invalid() noexcept { state_.store(invalid, memory_order_release); }
+
+    //! @brief Set state to valid
+    __host__ __device__ void set_valid() noexcept { state_.store(valid, memory_order_release); }
+
+    //! @brief Set state to ready
+    __host__ __device__ void set_ready() noexcept { state_.store(ready, memory_order_release); }
+
+    //! @brief Set state to released
+    __host__ __device__ void set_released() noexcept { state_.store(released, memory_order_release); }
+
+    // Internal accessors for portal (public but not documented for user)
+    __host__ __device__ unsigned & cl_line() noexcept { return cl_line_; }
+    __host__ __device__ unsigned cl_line() const noexcept { return cl_line_; }
+    __host__ __device__ unsigned & set_id() noexcept { return set_id_; }
+    __host__ __device__ unsigned set_id() const noexcept { return set_id_; }
+    __host__ __device__ unsigned & way() noexcept { return way_; }
+    __host__ __device__ unsigned way() const noexcept { return way_; }
+    __host__ __device__ bool & holding_cl_lock() noexcept { return holding_cl_lock_; }
+    __host__ __device__ bool holding_cl_lock() const noexcept { return holding_cl_lock_; }
+    __host__ __device__ bool & is_cache_hit() noexcept { return is_cache_hit_; }
+    __host__ __device__ bool is_cache_hit() const noexcept { return is_cache_hit_; }
+    __host__ __device__ state get_state() const noexcept { return state_.load(memory_order_acquire); }
+
+private:
+    //! @brief Internal fields
+
+    //! @brief io_pool slot (for I/O path)
+    unsigned cl_line_;
+    //! @brief cache set
+    unsigned set_id_;
+    //! @brief cache way
+    unsigned way_;
+    //! @brief Are we holding cache line seqlock?
+    bool holding_cl_lock_;
+    //! @brief Cache hit or I/O path?
+    bool is_cache_hit_;
+};
+
+// Type alias for backward compatibility (uses default thread_scope_block)
+using state_t = state_impl<>;
+
+} // namespace apply_sm
+
+}
+
+#endif

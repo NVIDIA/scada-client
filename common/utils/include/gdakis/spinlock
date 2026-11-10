@@ -1,0 +1,232 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_SPINLOCK
+#define GDAKIS_SPINLOCK
+
+#include <type_traits>
+
+#include <gdakis/__utils_cuda_compat>
+#include <gdakis/__utils_version>
+#include <gdakis/atomic>
+
+//! @file gdakis/spinlock
+
+GDAKIS_UTILS_SIMPLE_NS {
+GDAKIS_UTILS_UNIT(spinlock) {
+
+//! @brief A ticket lock implementation
+//! @tparam _Sco Synchronization scope
+template<thread_scope _Sco>
+class spinlock {
+protected:
+    //! @brief Current count
+    atomic<unsigned, _Sco> current_;
+
+    //! @brief Value to assign to the next thread locking
+    atomic<unsigned, _Sco> ticket_;
+
+#if !defined(NDEBUG)
+    //! @brief ID of the thread that is currently holding the lock
+    atomic<unsigned, _Sco> thread_id_;
+
+    //! @brief Block ID of the thread that is currently holding the lock
+    atomic<unsigned, _Sco> block_id_;
+#endif
+
+    //! @brief Maximum number of nanoseconds to spin while polling
+    static const size_t max_delay = 512;
+
+#if defined(__CUDACC__)
+    //! @brief Check if the spinlock is locked, and if so back off
+    //! @param delay Number of nanoseconds to wait after checking
+    //! @param current Current ticket counter of the lock
+    //! @param ticket Ticket value to wait for
+    __device__ bool is_locked(unsigned & delay, const unsigned & current, const unsigned & ticket) noexcept;
+#endif
+
+    //! @brief Execute a CPU critical section that returns a value
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Fn, typename... Args>
+    __host__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __host_critical_section(_Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Execute a CPU critical section without return value
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    template<typename _Fn, typename... Args>
+    __host__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __host_critical_section(_Fn && fn, Args &&... args) noexcept;
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+    //! @brief Execute a CUDA critical section that returns a value
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __device_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Execute a CUDA critical section without return value
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __device_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Execute a CUDA critical section that returns a value that threads in the warp execute in parallel
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __device_parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Execute a CUDA critical section without return value that threads in the warp execute in parallel
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __device_parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Execute a CUDA critical section that returns a value that threads in the warp execute sequentially
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ std::enable_if_t<!std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __device_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept;
+
+    //! @brief Execute a CUDA critical section without return value that threads in the warp execute sequentially
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ std::enable_if_t<std::is_void_v<std::invoke_result_t<_Fn, Args...>>, std::invoke_result_t<_Fn, Args...>>
+    __device_single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept;
+#endif
+
+    //! @brief Spin for a given number of nanosecond
+    //! @param delay Number of nanoseconds to spin for
+    __host__ __device__ inline void busy_wait(unsigned delay) const noexcept;
+
+public:
+    //! @brief Default constructor
+    __host__ __device__ spinlock() noexcept;
+
+    //! @brief Execute a critical section
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Fn, typename... Args>
+    __host__ __device__ auto critical_section(_Fn && fn, Args &&... args) noexcept
+        -> decltype(fn(std::forward<Args>(args)...));
+
+    //! @brief Acquire the lock
+    __host__ __device__ inline void lock() noexcept;
+
+    //! @brief Release the lock
+    __host__ __device__ inline void unlock() noexcept;
+
+#if defined(__CUDACC__) or defined(__DOXYGEN__)
+
+    //! @brief Execute a critical section
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ auto critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept
+        -> decltype(fn(std::forward<Args>(args)...));
+
+    //! @brief Execute a critical section where all threads within the warp execute in parallel
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ auto parallel_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept
+        -> decltype(fn(std::forward<Args>(args)...));
+
+    //! @brief Execute a critical section where all threads within the warp execute sequentially
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @tparam _Fn Functor type implementing the critical section
+    //! @tparam Args Argument types passed to the critical section functor
+    //! @param g Cooperative group calling the operation synchronously
+    //! @param fn Read critical section functor
+    //! @param ...args Arguments to forward to the critical section
+    //! @return Return value of the critical section
+    template<typename _Cg, typename _Fn, typename... Args>
+    __device__ auto single_thread_critical_section(const _Cg & g, _Fn && fn, Args &&... args) noexcept
+        -> decltype(fn(std::forward<Args>(args)...));
+
+    //! @brief Acquire the lock from multiple threads in a warp
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @param g Cooperative group calling the operation synchronously
+    //! @return Acquisition token
+    template<typename _Cg>
+    __device__ inline void lock(const _Cg & g) noexcept;
+
+    //! @brief Acquire the lock from multiple threads in a warp that aim to release the lock individually
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @param g Cooperative group calling the operation synchronously
+    //! @return Acquisition token
+    template<typename _Cg>
+    __device__ inline void parallel_lock(const _Cg & g) noexcept;
+
+    //! @brief Release the lock from multiple threads in a warp
+    //! @tparam _Cg Type of the cooperative group calling the operation
+    //! @param g Cooperative group calling the operation synchronously
+    //! @return Acquisition token
+    template<typename _Cg>
+    __device__ inline void unlock(const _Cg & g) noexcept;
+
+#endif
+};
+
+}}
+
+#include "impl/spinlock"
+
+GDAKIS_UTILS_SIMPLE_EXPORT_NS(gdakis, spinlock)
+
+#endif

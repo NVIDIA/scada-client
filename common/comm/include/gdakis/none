@@ -1,0 +1,28 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef GDAKIS_COMM_NONE
+#define GDAKIS_COMM_NONE
+
+#include <gdakis/__comm_cuda_compat>
+#include <type_traits>
+
+//! @file gdakis/comm/none
+
+namespace gdakis::comm {
+
+//! @brief An empty type
+struct none_type {
+    //! @brief Dummy set operation that just does nothing
+    //! @tparam Args Types for whatever parameters we choose to set
+    //! @param ...args Any arguments passed
+    template<typename... Args>
+    inline void set(Args &&... args) noexcept {};
+};
+static_assert(std::is_empty_v<none_type>, "Non-zero None Type");
+
+}
+
+#endif

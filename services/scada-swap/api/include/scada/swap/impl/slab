@@ -1,0 +1,32 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_IMPL_SLAB
+#define SCADA_SWAP_IMPL_SLAB
+
+#include <scada/swap/__cuda_compat>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(slab) {
+
+template<typename _Tp, typename _Store>
+inline slab<_Tp, _Store>::slab(_Store & store, slab_id_type id, std::size_t n_elems) noexcept
+    : store_(store),
+      id_(id),
+      n_elems_(n_elems) {}
+
+template<typename _Tp, typename _Store>
+inline constexpr slab_id_type slab<_Tp, _Store>::id() const noexcept {
+    return id_;
+}
+
+template<typename _Tp, typename _Store>
+inline std::size_t slab<_Tp, _Store>::size() const noexcept {
+    return n_elems_;
+}
+
+}}
+
+#endif

@@ -1,0 +1,138 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_STORE
+#define SCADA_SWAP_STORE
+
+//! @file scada/swap/store
+
+#include <psa/coaio/scheduler/epoll>
+#include <psa/coaio/socket>
+#include <psa/result>
+
+#include <scada/__scada_swap_version>
+#include <scada/swap/__cuda_compat>
+#include <scada/swap/__swap_log>
+#include <scada/traits>
+#include <scada/types>
+#include <scada/uuid>
+
+#include <scada/swap/slab>
+#include <scada/swap/types>
+
+#include <gdakis/bitmap>
+
+#include <mutex>
+#include <unordered_set>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(store) {
+
+namespace detail {
+//! @brief Factory type for stores
+template<io::socket::domain>
+struct store_factory;
+//! @brief Get default socket path based on CUDA_VISIBLE_DEVICES
+std::string get_default_socket_path();
+}
+
+//! @brief Client type for store
+//! @tparam _Domain Domain for the store
+template<io::socket::domain _Domain>
+class store {
+public:
+    //! @brief Slab type for when client allcoates slabs
+    //! @tparam _Tp Data type of elements in slab
+    template<typename _Tp>
+    using slab = slab<_Tp, store>;
+
+protected:
+    friend struct detail::store_factory<_Domain>;
+
+    //! @brief Number of buffer entries in control autobatch
+    static constexpr std::size_t control_wqe_size_ = 32;
+    //! @brief Specialized autobatch type the client uses to allocate and free slabs
+    using autobatch_type = typename store_traits<_Domain>::template autobatch_type<gdakis::umem::cpu, wqe_type,
+        gdakis::thread_scope_system, 1>;
+    //! @brief Handle type for the specialized autobatch type the client uses to allocate and free slabs
+    using autobatch_handle = typename autobatch_type::handle;
+    //! @brief IO buffer pool type for communciating slab ids
+    using io_buffer_pool_type = typename store_traits<_Domain>::template io_buffer_pool_type<slab_id_type, status_type>;
+    //! @brief Handle type for the IO buffer pool type for communciating slab ids
+    using io_buffer_pool_handle = typename io_buffer_pool_type::template handle<gdakis::umem::cpu>;
+    //! @brief bitmap type for allocating IO buffers from pool
+    using bitmap_type = typename gdakis::embedded_bitmap<unsigned, gdakis::thread_scope_system>;
+
+    //! @brief UUID of the store
+    static const scada::uuid uuid_;
+    //! @brief Scheduler used when sendings operations to server
+    io::scheduler scheduler_;
+    //! @brief Socket used for communication with service
+    io::socket conn_;
+
+    //! @brief Handle for the IO buffer pool type for communciating slab ids
+    io_buffer_pool_handle io_buffer_pool_;
+    //! @brief Handle for the specialized autobatch type the client uses to allocate and free slabs
+    autobatch_handle autobatch_;
+    //! @brief Atomic counter used to allocate IO buffer pool entries
+    std::atomic<unsigned> io_buffer_pool_ticket_;
+    //! @brief Bit map of free IO buffer pool entries
+    bitmap_type::word io_buffer_pool_freemap_[(control_wqe_size_ + (8 * sizeof(unsigned)) - 1) / (8 * sizeof(unsigned))]
+        = { 0 };
+    std::mutex slab_lock_;
+    std::unordered_set<slab_id_type> slabs_;
+
+    void free_slab(slab_id_type id) noexcept;
+
+public:
+    //! @brief Constructor for store on client
+    //! @param scheduler Scheduler used when sending operations to server
+    //! @param socket Socket used for communication with server
+    //! @param io_buffer_pool IO buffer pool for communciating slab ids
+    //! @param autobatch Autobatch the client uses to allocate and free slabs
+    store(io::scheduler && scheduler, io::socket && socket, io_buffer_pool_handle && io_buffer_pool,
+        autobatch_handle && autobatch) noexcept;
+
+//! @brief Move constructor for store on client
+//! @param rhs Store to move
+#pragma nv_exec_check_disable
+    store(store && rhs) noexcept;
+
+//! @brief Destructor for store on client
+#pragma nv_exec_check_disable
+    ~store() noexcept;
+
+    //! @brief Getter for the uuid of the store
+    //! @return UUID of the store
+    static const scada::uuid & id() noexcept;
+
+    //! @brief Getter for the socket used for communication to service
+    //! @return Reference to the socket
+    io::socket & socket() noexcept;
+
+    //! @brief Builder for stores
+    //! @tparam Args Variadic argument type for constructor arguments
+    //! @param args Arguments for constructor
+    //! @return Result type with store on success and error otherwise
+    template<typename... Args>
+    static result<store> build(Args &&... args) noexcept;
+
+    //! @brief Allocate slabs
+    //! @tparam _Tp Data element type in slab
+    //! @param n_elems Number of data elements in slab
+    //! @return Result type with slab on success and error otherwise
+    template<typename _Tp>
+    result<slab<_Tp>> alloc(std::size_t) noexcept;
+
+    void free(slab_id_type id) noexcept;
+};
+
+}}
+
+#include "impl/store"
+
+SCADA_SWAP_EXPORT_SIMPLE_NS(scada::swap, store)
+
+#endif

@@ -1,0 +1,35 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA___SWAP_VERSION
+#define SCADA___SWAP_VERSION
+
+#if !defined(SCADA_SWAP_VERSION)
+#  define SCADA_SWAP_VERSION 2
+#endif
+
+#if !defined(__DOXYGEN__)
+
+#  define ___SCADA_SWAP_CONCAT(a, b) a##b
+#  define __SCADA_SWAP_CONCAT(a, b) ___SCADA_SWAP_CONCAT(a, b)
+
+#  define SCADA_SWAP_SIMPLE_NS namespace scada::swap
+
+#  define SCADA_SWAP_UNIT(name) inline namespace __SCADA_SWAP_CONCAT(___, name)
+
+#  define SCADA_SWAP_EXPORT_SIMPLE_NS(root, name)                                                                      \
+      namespace root {                                                                                                 \
+      using namespace ::scada::swap::__SCADA_SWAP_CONCAT(___, name);                                                   \
+      }
+
+#else
+
+#  define SCADA_SWAP_SIMPLE_NS namespace scada::swap
+
+#  define SCADA_SWAP_UNIT(name)
+
+#endif
+
+#endif

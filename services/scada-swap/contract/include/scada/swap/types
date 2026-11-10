@@ -1,0 +1,111 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP
+#define SCADA_SWAP
+
+//! @file scada/swap/types
+
+#include <cstdint>
+#include <psa/coaio/scheduler/epoll>
+#include <psa/coaio/socket>
+#include <psa/result>
+#include <scada/__scada_swap_version>
+#include <scada/swap/__cuda_compat>
+#include <scada/swap/slab_id>
+#include <scada/types>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(types) {
+
+//! @brief Result type with integers for errors
+//! @tparam _Tp Data type for when result is ok
+template<typename _Tp>
+using result = psa::result<_Tp, int>;
+
+namespace io {
+//! @brief Scehduler data type
+using scheduler = psa::coaio::scheduler::epoll;
+//! @brief Socket data type
+using socket = psa::coaio::socket<scheduler>;
+}
+
+//! @brief Name of the domain
+static constexpr const char * name = "scada-swap";
+//! @brief Version of the domain
+static constexpr unsigned version = 1;
+
+//! @brief Operations supported by scada swap
+enum class operation : std::uint32_t {
+    //! @brief Invalid operation
+    invalid = 0x0,
+    //! @brief Fetch data
+    get = 0x1,
+    //! @brief Write data
+    put = 0x2,
+    //! @brief Allocate slab
+    alloc = 0x3,
+    //! @brief Free slab
+    free = 0x4
+};
+
+//! @brief Status of commands submitted to scada swap service
+enum class status_type : std::uint32_t {
+    //! @brief Service is still processing request
+    pending = 0x80000000,
+    //! @brief Incomplete operation
+    not_implemented = 0x80000001,
+    //! @brief No space in store for slab allocation
+    out_of_space = 0x80000002,
+    //! @brief Invalid operation or arguments or error
+    invalid = 0x80000003,
+    //! @brief Completed successfully
+    ok = 0x00000001,
+};
+
+//! @brief Type of work queue entries for communicating to swap service
+struct wqe_type {
+    //! @brief Operation
+    operation op_;
+    union {
+        //! @brief Fields for data access with get and put
+        struct {
+            //! @brief ID of the slab being accessed
+            std::uint32_t slab_id_;
+            //! @brief Offset of element being accessed
+            std::uint64_t key_;
+            //! @brief Number of contiguous elements being accessed
+            std::uint64_t n_elems_;
+            //! @brief ID of the IO buffer being used for the data transfer
+            std::uint32_t io_id_;
+            //! @brief Offset into the IO buffer being used for the data transfer
+            std::uint32_t io_offset_;
+            //! @brief IO access granularity
+            std::uint32_t access_granularity_;
+        } data_;
+        //! @brief Fields for allocating a slab
+        struct {
+            //! @brief Number of elements in slab
+            std::uint64_t store_size_;
+            //! @brief Size of each element in slab
+            std::uint32_t object_size_;
+            //! @brief ID of the IO buffer used for the server to communicate back the slab id
+            std::uint32_t io_id_;
+            //! @brief Offset into the IO buffer used for the server to communicate back the slab id
+            std::uint32_t io_offset_;
+        } alloc_;
+        //! @brief Fields for freeing a slab
+        struct {
+            //! @brief ID of slab to free
+            std::uint32_t id_;
+        } free_;
+    };
+};
+
+}}
+
+SCADA_SWAP_EXPORT_SIMPLE_NS(scada::swap, types)
+
+#endif

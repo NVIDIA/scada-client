@@ -1,0 +1,23 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef SCADA_SWAP_SLAB_ID
+#define SCADA_SWAP_SLAB_ID
+
+#include <scada/__scada_swap_version>
+
+#include <cstdint>
+
+SCADA_SWAP_SIMPLE_NS {
+SCADA_SWAP_UNIT(slab_id) {
+
+//! @brief Logical identifier type for allocated slabs
+using slab_id_type = std::uint16_t;
+
+}}
+
+SCADA_SWAP_EXPORT_SIMPLE_NS(scada::swap, slab_id)
+
+#endif

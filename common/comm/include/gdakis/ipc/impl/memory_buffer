@@ -1,0 +1,102 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#ifndef GDAKIS_IPC_IMPL_MEMORY_BUFFER
+#define GDAKIS_IPC_IMPL_MEMORY_BUFFER
+
+namespace gdakis::comm::ipc {
+
+template<typename _Td>
+template<typename _Allocator>
+inline memory_buffer<_Td>::handle<_Allocator>::handle(unsigned size, data_ptr && data) noexcept
+    : size_(size),
+      data_(std::move(data)) {}
+
+template<typename _Td>
+template<typename _Allocator>
+template<typename _Fn>
+inline typename memory_buffer<_Td>::template handle<_Allocator>::result_type
+memory_buffer<_Td>::handle<_Allocator>::build(unsigned size, _Fn && fn) noexcept {
+    auto data = shmem<_Allocator, _Td[]>::alloc_dma(size, std::forward<_Fn>(fn));
+    if (data == nullptr)
+        return result_type::err(ENOMEM);
+    return result_type::ok(handle(size, std::move(data)));
+}
+
+template<typename _Td>
+template<typename _Allocator>
+inline psa::result<typename memory_buffer<_Td>::template handle<_Allocator>::request_type, int>
+memory_buffer<_Td>::handle<_Allocator>::request() const noexcept {
+    auto handle = data_.handle();
+    if (handle.is_err()) {
+        return psa::result<request_type, int>::err(handle.err());
+    }
+    request_type ret;
+    ret.ancillary().set(data_.ancillary());
+    ret.data().req.buffer_size = size_ * sizeof(_Td);
+    ret.data().backend.buffer = handle.take_ok();
+
+    return psa::result<request_type, int>::ok(std::move(ret));
+}
+
+template<typename _Td>
+template<typename _Allocator>
+template<typename _Socket>
+inline auto memory_buffer<_Td>::handle<_Allocator>::send_to_server(_Socket & socket) noexcept {
+    auto msg = request();
+    using result_type = decltype(ipc::send_to_server(socket, msg.ok()).sync());
+    if (msg.is_err()) {
+        return result_type::err(msg.err());
+    }
+    auto res = ipc::send_to_server(socket, msg.ok()).sync();
+    if (res.is_err())
+        return res;
+
+    response_type ack;
+    res = socket.read(ack).sync();
+    if (res.is_err())
+        return res;
+    if (ack.status == status_type::ok) {
+        id_ = ack.id;
+    }
+    return ack.status == status_type::ok ? result_type::template ok<>()
+                                         : result_type::err(static_cast<int>(ack.status));
+}
+
+template<typename _Td>
+template<typename _Allocator>
+inline memory_buffer<_Td> memory_buffer<_Td>::handle<_Allocator>::get() const noexcept {
+    return memory_buffer(id_.has_value() ? id_.value() : -1, size_, data_.get());
+}
+
+template<typename _Td>
+template<typename _Allocator>
+inline const std::optional<int> memory_buffer<_Td>::handle<_Allocator>::id() const noexcept {
+    return id_;
+}
+
+template<typename _Td>
+inline memory_buffer<_Td>::memory_buffer(int id, unsigned num_blocks, _Td * data) noexcept
+    : id_(id),
+      num_blocks_(num_blocks),
+      data_(data) {}
+
+template<typename _Td>
+__host__ __device__ inline int memory_buffer<_Td>::id() const noexcept {
+    return id_;
+}
+
+template<typename _Td>
+__host__ __device__ inline unsigned memory_buffer<_Td>::number_of_blocks() const noexcept {
+    return num_blocks_;
+}
+
+template<typename _Td>
+__host__ __device__ inline _Td * memory_buffer<_Td>::data() const noexcept {
+    return data_;
+}
+
+}
+
+#endif
