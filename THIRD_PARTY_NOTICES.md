@@ -49,32 +49,26 @@ Source: <https://developercertificate.org/>.
 | Matplotlib, for optional benchmark plots | Matplotlib license (PSF-based), with additional component notices; see <https://matplotlib.org/stable/project/license.html> |
 | NumPy, for optional benchmark plots | BSD-3-Clause, with additional bundled-component licenses; see <https://numpy.org/doc/stable/license.html> |
 | pandas, for optional benchmark plots | BSD-3-Clause, with additional bundled-component licenses; see <https://github.com/pandas-dev/pandas/blob/main/LICENSE> and the selected distribution's license files |
-| CUDA Toolkit headers, compiler tools and CUDA runtime (`cudart`/device runtime) | NVIDIA CUDA Toolkit EULA, not Apache-2.0; see the [CUDA 13.0 agreement and component notices](https://docs.nvidia.com/cuda/archive/13.0.0/eula/index.html) and terms accompanying the selected Toolkit |
-| NVIDIA user-mode driver (`libcuda.so`) and optional `nvidia-smi` utility | NVIDIA driver license accompanying the installed distribution; these are separate from the Toolkit runtime and from the open GPU kernel-module source. See [NVIDIA driver licensing](https://www.nvidia.com/en-us/drivers/nvidia-license/) |
-| Linux UAPI headers | Per-file upstream terms; commonly GPL-2.0-only WITH Linux-syscall-note, with other licenses where declared. Preserve the selected headers' license identifiers and exceptions; see [Linux kernel licensing rules](https://www.kernel.org/doc/html/latest/process/license-rules.html) |
-| GNU C Library (`glibc`: C runtime, math and POSIX interfaces) | LGPL-2.1-or-later for the library, with additional file-specific upstream notices. See [glibc COPYING.LIB](https://sourceware.org/git/?p=glibc.git;a=blob;f=COPYING.LIB;hb=glibc-2.39) and [additional glibc notices](https://sourceware.org/git/?p=glibc.git;a=blob;f=LICENSES;hb=glibc-2.39); retain the selected OS package's complete copyright/license record for any binary redistribution |
-| GNU C++ standard library (`libstdc++`) | GPL-3.0-or-later WITH GCC-exception-3.1 for applicable library files; preserve other per-file notices. See the [libstdc++ license](https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html) and [GCC Runtime Library Exception 3.1](https://www.gnu.org/licenses/gcc-exception-3.1.html) |
-| GCC low-level runtime (`libgcc`, including `libgcc_s`) | GPL-3.0-or-later WITH GCC-exception-3.1 for applicable runtime files; see the [GCC runtime exception coverage and conditions](https://www.gnu.org/licenses/gcc-exception-3.1-faq.html). This is distinct from executing the GCC compiler |
+| CUDA Toolkit headers, compiler tools and runtime | [NVIDIA CUDA Toolkit EULA and component notices](https://docs.nvidia.com/cuda/archive/13.0.0/eula/index.html) for the selected version |
+| NVIDIA user-mode driver (`libcuda.so`) and `nvidia-smi` | [NVIDIA driver license](https://www.nvidia.com/en-us/drivers/nvidia-license/) accompanying the installed driver |
+| Linux UAPI headers | Per-file licenses, commonly GPL-2.0-only WITH Linux-syscall-note; see [kernel licensing rules](https://www.kernel.org/doc/html/latest/process/license-rules.html) |
+| GNU C Library (`glibc`) | LGPL-2.1-or-later plus file-specific notices; see [COPYING.LIB](https://sourceware.org/git/?p=glibc.git;a=blob;f=COPYING.LIB;hb=glibc-2.39) and [LICENSES](https://sourceware.org/git/?p=glibc.git;a=blob;f=LICENSES;hb=glibc-2.39) |
+| GNU C++ standard library (`libstdc++`) | [GPL-3.0-or-later WITH GCC-exception-3.1](https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html), plus applicable per-file notices |
+| GCC low-level runtime (`libgcc`, `libgcc_s`) | GPL-3.0-or-later WITH GCC-exception-3.1; see [runtime exception coverage](https://www.gnu.org/licenses/gcc-exception-3.1-faq.html) |
 | CMake, build tool | BSD-3-Clause; see <https://cmake.org/licensing/> |
-| GCC, separately executed compiler | GPL-3.0-or-later; see [GCC copying terms](https://gcc.gnu.org/onlinedocs/gcc/Copying.html). Runtime exceptions apply to designated runtime files, not to the compiler executable as a whole |
-| Clang, if selected as the host compiler | Apache-2.0 WITH LLVM-exception; see [LLVM licensing](https://llvm.org/docs/DeveloperPolicy.html#license). Record the actual C/C++ runtime separately |
-| GNU binutils, separately executed host tools | GPL-3.0-or-later for the assembler/linker/archive executables; see [GNU binutils copying terms](https://sourceware.org/binutils/docs/binutils/Copying.html) and selected tool notices |
+| GCC compiler | [GPL-3.0-or-later](https://gcc.gnu.org/onlinedocs/gcc/Copying.html) |
+| Clang compiler (alternative) | [Apache-2.0 WITH LLVM-exception](https://llvm.org/docs/DeveloperPolicy.html#license) |
+| GNU binutils host tools | [GPL-3.0-or-later](https://sourceware.org/binutils/docs/binutils/Copying.html) |
 | GNU Make, when using a Makefiles generator | GPL-3.0-or-later; see [GNU Make copying terms](https://www.gnu.org/software/make/manual/html_node/Copying.html) |
 | Ninja, when using a Ninja generator | Apache-2.0; see [Ninja COPYING](https://github.com/ninja-build/ninja/blob/master/COPYING) |
 | Python, development/benchmark tool | PSF license and additional component notices; see <https://docs.python.org/3/license.html> |
 | Git, development/CI tool | GPL-2.0; see <https://git-scm.com/about> |
-| GNU Bash 4+, development/CI interpreter | GPL-3.0-or-later; see [Bash licensing](https://www.gnu.org/software/bash/). Older or alternative host interpreters require their own version-specific record |
-| GNU coreutils, development/CI executables | GPL-3.0-or-later; see [coreutils COPYING](https://github.com/coreutils/coreutils/blob/master/COPYING). Used commands are listed in DEPENDENCIES.md |
+| GNU Bash 4+, development/CI interpreter | [GPL-3.0-or-later](https://www.gnu.org/software/bash/) |
+| GNU coreutils, development/CI executables | [GPL-3.0-or-later](https://github.com/coreutils/coreutils/blob/master/COPYING) |
 | `actions/checkout`, CI tool | MIT; see the [license at the pinned commit](https://github.com/actions/checkout/blob/11bd71901bbe5b1630ceea73d27597364c9af683/LICENSE) |
 
-These separately obtained dependencies are not bundled in the source snapshot.
-The initial release is source-only and does not distribute compiled SCADA
-libraries, a Toolkit, a driver, system/runtime libraries or a container.
-Header/template inclusion and static runtime linkage can incorporate upstream
-code into a consumer's output even when no dependency source is vendored here.
-Binary distributions must be assessed against their actual contents and linkage
-and carry the applicable notices and terms; this table does not qualify a
-binary redistribution or replace a selected package's complete license record.
+These dependencies are not bundled in this source-only release. Binary
+distributions must carry the notices and terms applicable to their actual contents.
 See [DEPENDENCIES.md](DEPENDENCIES.md) for versions, purposes and interactions.
 The optional plotting packages are unpinned. Resolve their actual versions and
 transitive dependencies before treating an environment inventory as complete;
