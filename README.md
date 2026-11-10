@@ -105,6 +105,9 @@ and linked without being executed or contacting a server. See
 NVIDIA-owned files are licensed under [Apache 2.0](LICENSE). Copyright remains
 with NVIDIA CORPORATION & AFFILIATES. Third-party files retain their terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The adapted [Contributor Covenant](CODE_OF_CONDUCT.md) uses CC-BY-4.0, whose
+complete text is in [LICENSES/CC-BY-4.0.txt](LICENSES/CC-BY-4.0.txt).
+The vendored [CPM.cmake](cmake/CPM.cmake) retains its upstream MIT license.
 
 Use [GitHub Issues](https://github.com/NVIDIA/scada-client/issues) for
 non-security questions and reports. See [SUPPORT.md](SUPPORT.md),
